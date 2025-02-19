@@ -36,14 +36,50 @@ __device__ __forceinline__ T max(const T a, const T b){
     return a > b ? a : b;
 }
 
-template <typename T>
+template <typename T, bool TestIfSorted = false>
 __device__ __forceinline__ void CoreSmallSort(T* input, const int nbValuesInVec){
-    if(IsSorted(input, nbValuesInVec)){
-        return;
+    if constexpr (TestIfSorted){
+        if(IsSorted(input, nbValuesInVec)){
+            return;
+        }
     }
 
     int vecincout = 0;
-    for(long int stepout = 1 ; stepout < nbValuesInVec ; stepout *= 2){
+    {
+        unsigned laneId;
+        asm("mov.u32 %0, %%laneid;" : "=r"(laneId));
+        const unsigned fullMask = 0xFFFFFFFF;
+
+        T a = input[threadIdx.x];
+        for(long int stepout = 1 ; stepout < 32 ; stepout *= 2){
+            {
+                const int ffttout = (threadIdx.x & stepout);
+                vecincout = vecincout + (ffttout? -stepout : stepout);
+                const int vecpermute = (vecincout+laneId);
+                const T b = __shfl_sync(fullMask, a, vecpermute);
+                a = (ffttout ? max(a, b) : min(a, b));
+            }
+    
+            for(long int step = stepout/2 ; step >= 1 ; step/=2){
+                const int vecinc = step;
+                const int fftt = (threadIdx.x & step);
+                const int vecincout2 = (fftt? -vecinc  : vecinc);
+                const int vecpermute = (vecincout2+laneId);
+                const T b = __shfl_sync(fullMask, a, vecpermute);
+                a = (fftt ? max(a, b) : min(a, b));
+            }
+        }
+        input[threadIdx.x] = a;
+        __syncthreads();
+    }
+
+    if constexpr (TestIfSorted){
+        if(IsSorted(input, nbValuesInVec)){
+            return;
+        }
+    }
+
+    for(long int stepout = 32 ; stepout < nbValuesInVec ; stepout *= 2){
         {
             const int ffttout = (threadIdx.x & stepout);
             vecincout = vecincout + (ffttout? -stepout : stepout);
@@ -59,16 +95,18 @@ __device__ __forceinline__ void CoreSmallSort(T* input, const int nbValuesInVec)
         for(long int step = stepout/2 ; step >= 1 ; step/=2){
             const int vecinc = step;
             const int fftt = (threadIdx.x & step);
-            const int vecincout = (fftt? -vecinc  : vecinc);
-            const int vecpermute = (threadIdx.x + vecincout);
+            const int vecincout2 = (fftt? -vecinc  : vecinc);
+            const int vecpermute = (threadIdx.x + vecincout2);
             const T a = input[threadIdx.x];
             const T b = input[vecpermute];
             const T best = (fftt ? max(a, b) : min(a, b));
             __syncthreads();
             input[threadIdx.x] = best;
             __syncthreads();
-            if(IsSorted(input, nbValuesInVec)){
-                return;
+            if constexpr (TestIfSorted){
+                if(IsSorted(input, nbValuesInVec)){
+                    return;
+                }
             }
         }
     }
@@ -140,7 +178,7 @@ void test() {
     const int MaxSize = std::min(int(MaxSharedMemSize / sizeof(int)), MaxThreadsPerBlock);
     std::cout << "Max size: " << MaxSize << std::endl;
 
-    for(int idxSize = 2 ; idxSize < MaxSize ; idxSize *= 2){
+    for(int idxSize = 32 ; idxSize < MaxSize ; idxSize *= 2){
         // Number of elements to sort
         const int N = idxSize;
         assert(N <= MaxSharedMemSize / sizeof(int));
