@@ -5,6 +5,8 @@
 #include <cuda_runtime.h>
 #include <cassert>
 #include <algorithm>
+#include <cuda/pipeline>
+#include <cooperative_groups.h>
 
 template <typename T>
 __device__ __forceinline__ bool IsSorted(const T* input, const int nbValuesInVec){
@@ -44,11 +46,11 @@ __device__ __forceinline__ void CoreSmallSort(T* input, const int nbValuesInVec)
         }
     }
 
+    unsigned laneId;
+    asm("mov.u32 %0, %%laneid;" : "=r"(laneId));
+    const unsigned fullMask = 0xFFFFFFFF;
     int vecincout = 0;
     {
-        unsigned laneId;
-        asm("mov.u32 %0, %%laneid;" : "=r"(laneId));
-        const unsigned fullMask = 0xFFFFFFFF;
 
         T a = input[threadIdx.x];
         for(long int stepout = 1 ; stepout < 32 ; stepout *= 2){
@@ -87,12 +89,11 @@ __device__ __forceinline__ void CoreSmallSort(T* input, const int nbValuesInVec)
             const T a = input[threadIdx.x];
             const T b = input[vecpermute];
             const T best = (ffttout ? max(a, b) : min(a, b));
-            __syncthreads();
             input[threadIdx.x] = best;
             __syncthreads();
         }
 
-        for(long int step = stepout/2 ; step >= 1 ; step/=2){
+        for(long int step = stepout/2 ; step >= 32 ; step/=2){
             const int vecinc = step;
             const int fftt = (threadIdx.x & step);
             const int vecincout2 = (fftt? -vecinc  : vecinc);
@@ -100,13 +101,25 @@ __device__ __forceinline__ void CoreSmallSort(T* input, const int nbValuesInVec)
             const T a = input[threadIdx.x];
             const T b = input[vecpermute];
             const T best = (fftt ? max(a, b) : min(a, b));
-            __syncthreads();
             input[threadIdx.x] = best;
             __syncthreads();
-            if constexpr (TestIfSorted){
-                if(IsSorted(input, nbValuesInVec)){
-                    return;
-                }
+        }
+
+        T a = input[threadIdx.x];
+        for(long int step = 16 ; step >= 1 ; step/=2){
+            const int vecinc = step;
+            const int fftt = (threadIdx.x & step);
+            const int vecincout2 = (fftt? -vecinc  : vecinc);
+            const int vecpermute = (vecincout2+laneId);
+            const T b = __shfl_sync(fullMask, a, vecpermute);
+            a = (fftt ? max(a, b) : min(a, b));
+        }
+        input[threadIdx.x] = a;
+        __syncthreads();
+
+        if constexpr (TestIfSorted){
+            if(IsSorted(input, nbValuesInVec)){
+                return;
             }
         }
     }
@@ -148,6 +161,38 @@ __global__ void sort_dv(T* d_arr, const int n) {
     if(threadIdx.x < n){
         d_arr[threadIdx.x] = shared[threadIdx.x];
     }
+}
+
+// Template CUDA kernel to sort an array
+template <typename T>
+__global__ void sort_dv_async(T* d_arr, const int n) {
+    // Declare shared memory ptr
+    extern __shared__ T shared_data[];
+    auto block = cooperative_groups::this_thread_block();
+    // Declare the barrier in shared memory.
+    __shared__ cuda::barrier<cuda::thread_scope_block> bar;
+
+    // Initialize the barrier using a friend function (or an appropriate initializer).
+    if (threadIdx.x == 0) {
+        init(&bar, block.size());
+    }
+    block.sync(); // Ensure all threads see the initialized barrier
+
+    // Asynchronous copy from global to shared memory.
+    if (threadIdx.x == 0) {
+        cuda::memcpy_async(shared_data, d_arr, sizeof(T)*n, bar);
+    } else if (threadIdx.x >= n) {
+        shared_data[threadIdx.x] = my_numeric_limits_max<T>();
+    }
+    bar.arrive_and_wait();
+
+    // Sort
+    CoreSmallSort(shared_data, n);
+    // Copy back
+    if(threadIdx.x == 0){
+        cuda::memcpy_async(d_arr, shared_data, sizeof(T)*n, bar);
+    }
+    bar.arrive_and_wait();
 }
 
 void CUDA_CHECK(cudaError_t err) {
@@ -216,7 +261,8 @@ void test() {
 
         // Launch the sort kernel (template instantiated for int)
         const int sharedMemSize = NOrPow2 * sizeof(int);
-        sort_dv<int><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_array, N);
+        //sort_dv<int><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_array, N);
+        sort_dv_async<int><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_array, N);
 
         // Wait for GPU to finish before accessing on host
         CUDA_CHECK(cudaDeviceSynchronize());
