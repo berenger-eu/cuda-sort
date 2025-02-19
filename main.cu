@@ -41,9 +41,9 @@ __device__ __forceinline__ void CoreSmallSort(T* input, const int nbValuesInVec)
         return;
     }
 
-    int ffttout = (threadIdx.x & 1) ;//svzip1_b32(svpfalse_b(),svptrue_b32());
+    // int ffttout = (threadIdx.x & 1) ;//svzip1_b32(svpfalse_b(),svptrue_b32());
 
-    int vecincout = (ffttout?-1:1);//svsel_s32(ffttout, svdup_s32(-1), svdup_s32(1));
+    // int vecincout = (ffttout?-1:1);//svsel_s32(ffttout, svdup_s32(-1), svdup_s32(1));
 
 //     {// stepout == 1
 //         const int vecpermute = threadIdx.x + vecincout;//svadd_s32_z(svptrue_b32(), vecindex, vecincout);
@@ -55,10 +55,9 @@ __device__ __forceinline__ void CoreSmallSort(T* input, const int nbValuesInVec)
 //         //                       : max(input[threadIdx.x], input[vecpermute]));// svmin_s32_z(svptrue_b32(), input, inputPerm));
 //         __syncthreads();
 //     }
-    vecincout = 0;
     for(long int stepout = 1 ; stepout < nbValuesInVec ; stepout *= 2){
-        ffttout = (threadIdx.x & stepout); // svzip1_b32(ffttout,ffttout);
-        vecincout = (ffttout? // svsel_s32(ffttout,
+        const int ffttout = (threadIdx.x & stepout); // svzip1_b32(ffttout,ffttout);
+        const int vecincout = (ffttout? // svsel_s32(ffttout,
                      vecincout - stepout // svsub_n_s32_z(svptrue_b32(), vecincout, stepout),
                      : vecincout + stepout); // svadd_n_s32_z(svptrue_b32(), vecincout, stepout));
         {
@@ -72,21 +71,27 @@ __device__ __forceinline__ void CoreSmallSort(T* input, const int nbValuesInVec)
             __syncthreads();
         }
 
-        int fftt = (threadIdx.x ^ (stepout/2)); //svuzp2_b32(ffttout,ffttout);
 
-        int vecinc = (stepout/2); // svdup_s32(stepout/2);
 
         for(long int step = stepout/2 ; step >= 1 ; step/=2){
+            const int vecinc = step; // svdup_s32(stepout/2);
+            const int fftt = (threadIdx.x & step); //svuzp2_b32(ffttout,ffttout);
             const int vecpermute = (threadIdx.x + (fftt? -vecinc  : vecinc)); // svadd_s32_z(svptrue_b32(), vecindex, svsel_s32(fftt, svsel_s32(fftt, svneg_s32_z(fftt, vecinc), vecinc), vecinc));
 
             // const svint32_t inputPerm = svtbl_s32(input, svreinterpret_u32_s32(vecpermute));
             printf("threadIdx.x %d <-> vecpermute %d\n", threadIdx.x, vecpermute);
+            const T a = input[threadIdx.x];
+            const T b = input[vecpermute];
+            const T best = (fftt ? min(a, b) : max(a, b));
+            __syncthreads();
+
+            input[threadIdx.x] = best;
             // input[threadIdx.x] = (fftt ?// svsel_s32(fftt,
             //     min(input[threadIdx.x], input[vecpermute]) //svmax_s32_z(svptrue_b32(), input, inputPerm),
             //     : max(input[threadIdx.x], input[vecpermute])); // svmin_s32_z(svptrue_b32(), input, inputPerm));
 
-            fftt = (threadIdx.x ^ (step/2)); // svuzp2_b32(fftt,fftt);
-            vecinc = vecinc/2; // svdiv_n_s32_z(svptrue_b32(), vecinc, 2); // Could be shift be need cast
+            // fftt = (threadIdx.x ^ (step/2)); // svuzp2_b32(fftt,fftt);
+            // vecinc = vecinc/2; // svdiv_n_s32_z(svptrue_b32(), vecinc, 2); // Could be shift be need cast
             __syncthreads();
             if(IsSorted(input, nbValuesInVec)){
                 return;
