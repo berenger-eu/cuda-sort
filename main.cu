@@ -567,12 +567,17 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort){
         Core_Sort_1Warp_SM_lt32<T, FullSM><<<1,32>>>(dataToSort, nbValuesToSort);
         return;
     }
-    
+
     int MaxThreadsPerBlock;
     CUDA_CHECK(cudaDeviceGetAttribute(&MaxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, 0));
     const int NOrPow2 = GreaterPowerOf2EqualOrLarger(nbValuesToSort);
     if(NOrPow2 <= MaxThreadsPerBlock){
-        Sort_1Block_async_gt32<T, TestIfSorted, FullSM><<<1,NOrPow2,NOrPow2*sizeof(T)>>>(dataToSort, nbValuesToSort);
+        if constexpr(async){
+            Sort_1Block_async_gt32<T, TestIfSorted, FullSM><<<1,NOrPow2,NOrPow2*sizeof(T)>>>(dataToSort, nbValuesToSort);
+        }
+        else{
+            Sort_1Block_gt32<T, TestIfSorted, FullSM><<<1,NOrPow2,NOrPow2*sizeof(T)>>>(dataToSort, nbValuesToSort);
+        }
         return;
     }
 
@@ -584,6 +589,15 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort){
     CUDA_CHECK(cudaMemset(pivots, 0, 34 * sizeof(int)));
 
     Sort_core_buildPivots<T><<<1, 32>>>(dataToSort, nbValuesToSort, pivots);
+
+    {// TODO debug
+        int pivotsHost[34];
+        CUDA_CHECK(cudaMemcpy(pivotsHost, pivots, 34 * sizeof(int), cudaMemcpyDeviceToHost));
+        for(int i = 0 ; i < 34 ; i++){
+            std::cout << pivotsHost[i] << " ";
+        }
+        std::cout << std::endl;
+    }
 
     int* counterParts = nullptr;
     CUDA_CHECK(cudaMalloc(&counterParts, 34 * sizeof(int)));
@@ -792,13 +806,13 @@ int main() {
         test<false, false, false>();
     }
     if(true){
-        testfull<true, true, true>();
-        testfull<true, true, false>();
-        testfull<true, false, true>();
-        testfull<true, false, false>();
-        testfull<false, true, true>();
-        testfull<false, true, false>();
-        testfull<false, false, true>();
+        // testfull<true, true, true>();
+        // testfull<true, true, false>();
+        // testfull<true, false, true>();
+        // testfull<true, false, false>();
+        // testfull<false, true, true>();
+        // testfull<false, true, false>();
+        // testfull<false, false, true>();
         testfull<false, false, false>();
     }
     return 0;
