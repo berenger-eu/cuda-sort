@@ -160,6 +160,7 @@ __global__ void Core_Sort_1Warp_SM_lt32(T* dataToSort, const int nbValuesToSort)
 template <typename T, bool TestIfSorted = false, bool FullSM = true>
 __device__ __forceinline__ void Core_Sort_1Block_SM_gt32_d(T* dataToSort, const int nbValuesToSort){
     assert(nbValuesToSort == blockDim.x);
+    assert((blockDim.x-1) & blockDim.x == 0);
 
     if constexpr (TestIfSorted){
         if(TestIfSorted_1Block(dataToSort, nbValuesToSort)){
@@ -313,6 +314,7 @@ __device__ void Sort_1Block_gt32_d(T* dataToSort, const int nbValuesToSort) {
     // Declare shared memory ptr
     extern __shared__ T shared[];
     assert(nbValuesToSort <= blockDim.x);
+    assert((blockDim.x-1) & blockDim.x == 0);
     // Copy
     if(threadIdx.x < nbValuesToSort){
         shared[threadIdx.x] = dataToSort[threadIdx.x];
