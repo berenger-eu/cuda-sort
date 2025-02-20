@@ -532,7 +532,7 @@ __global__ void BuildPrefix_SM( NumType* prefixTree, const IndexType inSize){
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
 
-template <typename T, bool TestIfSorted = false, bool FullSM = true>
+template <typename T>
 __global__ void Sort_core_buildPivots(T* dataToSort, const int nbValuesToSort, T* pivots){
     // We copy values from the array to build the partition
     assert(gridDim.x == 1);
@@ -556,7 +556,7 @@ __global__ void Sort_core_buildPivots(T* dataToSort, const int nbValuesToSort, T
     }
 }
 
-template <typename T, bool TestIfSorted = false, bool FullSM = true>
+template <typename T, bool TestIfSorted, bool FullSM, bool async>
 __global__ void SortPartitions(T* dataToSort, const int nbValuesToSort, const int counterParts[], const int nbParts){
     for(int idxPart = blockIdx.x ; idxPart < nbParts; idxPart += gridDim.x){
         const int start = counterParts[idxPart];
@@ -566,13 +566,18 @@ __global__ void SortPartitions(T* dataToSort, const int nbValuesToSort, const in
             Core_Sort_1Warp_SM_lt32_d<T, FullSM>(dataToSort+start, size);
         }
         else if(size <= blockDim.x){
-            Sort_1Block_async_gt32_d<T, TestIfSorted, FullSM>(dataToSort+start, size);
+            if constexpr(async){
+                Sort_1Block_async_gt32_d<T, TestIfSorted, FullSM>(dataToSort+start, size);
+            }
+            else{
+                Sort_1Block_gt32_d<T, TestIfSorted, FullSM>(dataToSort+start, size);
+            }
         }
     }
 }
 
 
-template <typename T, bool TestIfSorted = false, bool FullSM = true>
+template <typename T, bool TestIfSorted, bool FullSM, bool async>
 __host__ void Sort(T* dataToSort, const int nbValuesToSort){
     if(nbValuesToSort <= 32){
         Core_Sort_1Warp_SM_lt32<T, FullSM><<<1,32>>>(dataToSort, nbValuesToSort);
@@ -610,7 +615,7 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort){
     CUDA_CHECK(cudaFree(dataBuffer));
     CUDA_CHECK(cudaFree(pivots));
 
-    SortPartitions<T, TestIfSorted, FullSM><<< 32, 1024>>>(dataToSort, nbValuesToSort, counterParts, 32);
+    SortPartitions<T, TestIfSorted, FullSM, async><<< 32, 1024>>>(dataToSort, nbValuesToSort, counterParts, 32);
 
     int counterPartsHost[34];
     CUDA_CHECK(cudaMemcpy(counterPartsHost, counterParts, 34 * sizeof(int), cudaMemcpyDeviceToHost));
@@ -621,7 +626,7 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort){
         const int end = counterParts[idxPart+1];
         const int size = end-start;
         if(size > 1024){
-            Sort<T, TestIfSorted, FullSM>(dataBuffer+start, size);
+            Sort<T, TestIfSorted, FullSM, async>(dataBuffer+start, size);
         }
     }
 }
@@ -720,78 +725,75 @@ void test() {
     }
 }
 
+template<bool TestIfSorted, bool FullSM, bool async>
 void testfull() {
-    // Size of the shared memory on the device, calling cuda api
-    int MaxSharedMemSize;
-    CUDA_CHECK(cudaDeviceGetAttribute(&MaxSharedMemSize, cudaDevAttrMaxSharedMemoryPerBlock, 0));
-    std::cout << "Shared memory size: " << MaxSharedMemSize << std::endl;
-    // Max number of threads per block
-    int MaxThreadsPerBlock;
-    CUDA_CHECK(cudaDeviceGetAttribute(&MaxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, 0));
-    std::cout << "Max threads per block: " << MaxThreadsPerBlock << std::endl;
     // Limit the size to this value
-    const int MaxSize = std::min(int(MaxSharedMemSize / sizeof(int)), MaxThreadsPerBlock);
+    const int MaxSize = (1 << 20);
     std::cout << "Max size: " << MaxSize << std::endl;
 
     for(int idxSize = 32 ; idxSize < MaxSize ; idxSize *= 2){
-        // Number of elements to sort
-        const int N = idxSize;
-        assert(N <= MaxSharedMemSize / sizeof(int));
-        const int NOrPow2 = GreaterPowerOf2EqualOrLarger(N);
-        assert(((NOrPow2-1) & NOrPow2) == 0);
-        assert(NOrPow2 <= MaxSharedMemSize / sizeof(int));
+        for(const bool randValues : {false, true}){
+            // Number of elements to sort
+            const int N = idxSize;
+            const int NOrPow2 = GreaterPowerOf2EqualOrLarger(N);
+            assert(((NOrPow2-1) & NOrPow2) == 0);
 
-        std::cout << "Testing with " << N << " elements" << std::endl;
-        std::cout << " - Number of threads: " << NOrPow2 << std::endl;
-        std::cout << " - Shared memory size: " << NOrPow2 * sizeof(int) << std::endl;
+            std::cout << "Testing with " << N << " elements" << std::endl;
 
-        // Create a host vector and fill it with random values (using C++11 random)
-        std::vector<int> h_array(N);
-        std::random_device rd;
-        std::mt19937 gen(0);
-        std::uniform_int_distribution<int> dis(0, 10000);
-        for (int i = 0; i < N; ++i) {
-            h_array[i] = N-i;//dis(gen);
-        }
-
-        // Make a copy of the host array and sort it using std::sort for later verification.
-        std::vector<int> h_sorted = h_array;
-        std::sort(h_sorted.begin(), h_sorted.end());
-
-        // Allocate device memory for the array
-        int* d_array = nullptr;
-        CUDA_CHECK(cudaMalloc(&d_array, N * sizeof(int)));
-
-        // Copy data from host to device
-        CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), N * sizeof(int), cudaMemcpyHostToDevice));
-
-        Sort<int>(d_array, N);
-
-        // Wait for GPU to finish before accessing on host
-        CUDA_CHECK(cudaDeviceSynchronize());
-
-        // Copy the (supposedly sorted) array back from device to host
-        std::vector<int> h_result(N);
-        CUDA_CHECK(cudaMemcpy(h_result.data(), d_array, N * sizeof(int), cudaMemcpyDeviceToHost));
-
-        // Free device memory
-        CUDA_CHECK(cudaFree(d_array));
-
-
-        // Verify that the device result matches the sorted host array
-        if (h_result != h_sorted) {
-            for(int i = 0 ; i < N ; i++){
-                std::cout << h_result[i] << " " << h_sorted[i] << std::endl;
+            std::vector<int> h_array(N);
+            if(randValues){
+                // Create a host vector and fill it with random values (using C++11 random)
+                std::random_device rd;
+                std::mt19937 gen(0);
+                std::uniform_int_distribution<int> dis(0, 10000);
+                for (int i = 0; i < N; ++i) {
+                    h_array[i] = N-i;//dis(gen);
+                }
             }
-            std::cout << "The array is NOT correctly sorted." << std::endl;
-            assert(0);
+            else{
+                for (int i = 0; i < N; ++i) {
+                    h_array[i] = N-i;
+                }
+            }
+
+            // Make a copy of the host array and sort it using std::sort for later verification.
+            std::vector<int> h_sorted = h_array;
+            std::sort(h_sorted.begin(), h_sorted.end());
+
+            // Allocate device memory for the array
+            int* d_array = nullptr;
+            CUDA_CHECK(cudaMalloc(&d_array, N * sizeof(int)));
+
+            // Copy data from host to device
+            CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), N * sizeof(int), cudaMemcpyHostToDevice));
+
+            Sort<int, TestIfSorted, FullSM, async>(d_array, N);
+
+            // Wait for GPU to finish before accessing on host
+            CUDA_CHECK(cudaDeviceSynchronize());
+
+            // Copy the (supposedly sorted) array back from device to host
+            std::vector<int> h_result(N);
+            CUDA_CHECK(cudaMemcpy(h_result.data(), d_array, N * sizeof(int), cudaMemcpyDeviceToHost));
+
+            // Free device memory
+            CUDA_CHECK(cudaFree(d_array));
+
+            // Verify that the device result matches the sorted host array
+            if (h_result != h_sorted) {
+                for(int i = 0 ; i < N ; i++){
+                    std::cout << h_result[i] << " " << h_sorted[i] << std::endl;
+                }
+                std::cout << "The array is NOT correctly sorted." << std::endl;
+                assert(0);
+            }
         }
     }
 }
 
 
 int main() {
-    if(true){
+    if(false){
         test<true, true, true>();
         test<true, true, false>();
         test<true, false, true>();
@@ -801,6 +803,15 @@ int main() {
         test<false, false, true>();
         test<false, false, false>();
     }
-    //testfull();
+    if(true){
+        testfull<true, true, true>();
+        testfull<true, true, false>();
+        testfull<true, false, true>();
+        testfull<true, false, false>();
+        testfull<false, true, true>();
+        testfull<false, true, false>();
+        testfull<false, false, true>();
+        testfull<false, false, false>();
+    }
     return 0;
 }
