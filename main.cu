@@ -116,7 +116,7 @@ __device__ __forceinline__ void Core_Sort_1Warp_SM_lt32_d(T* dataToSort, const i
                 const T b = dataToSort[vecpermute];
                 const T best = (ffttout ? max(a, b) : min(a, b));
                 dataToSort[threadIdx.x] = best;
-                // Not needed __syncwarp(0xffffffff);
+                __syncwarp(0xffffffff);
             }
     
             for(long int step = stepout/2 ; step >= 1 ; step/=2){
@@ -128,7 +128,7 @@ __device__ __forceinline__ void Core_Sort_1Warp_SM_lt32_d(T* dataToSort, const i
                 const T b = dataToSort[vecpermute];
                 const T best = (fftt ? max(a, b) : min(a, b));
                 dataToSort[threadIdx.x] = best;
-                // Not needed __syncwarp(0xffffffff);
+                __syncwarp(0xffffffff);
             }
         }
     }
