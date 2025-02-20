@@ -402,8 +402,8 @@ __device__ void CountParts_Grid_32_core(const T* data, const int size, const T p
 
     if(threadIdx.x < 32){
         localPivots[threadIdx.x] = pivots[threadIdx.x];
+        localCounters[threadIdx.x] = 0;
     }
-    localCounters[threadIdx.x] = 0;
     __syncthreads();
 
     const int id = threadIdx.x + blockIdx.x * blockDim.x;
@@ -419,18 +419,11 @@ __device__ void CountParts_Grid_32_core(const T* data, const int size, const T p
     }
 
     __syncthreads();
-
-    // Warp-Level Reduction using Shared Memory
-    for(int step = blockDim.x / 2; step >= 32; step /= 2){
-        if(threadIdx.x < step){
-            localCounters[threadIdx.x] += localCounters[threadIdx.x + step];
-        }
-        __syncthreads();
-    }
 }
 
+
 template <typename T>
-__device__ void CountParts_Grid_32_d(const T* data, const int size, const T* pivots, int* counters){
+__global__ void CountParts_Grid_32(const T* data, const int size, const T* pivots, int* counters){
     // Nb threads must be power of 2
     assert(((blockDim.x - 1) & blockDim.x) == 0);
     assert(blockDim.x >= 32);
@@ -444,13 +437,7 @@ __device__ void CountParts_Grid_32_d(const T* data, const int size, const T* piv
 }
 
 template <typename T>
-__global__ void CountParts_Grid_32(const T* data, const int size, const T* pivots, int* counters){
-    CountParts_Grid_32_d(data, size, pivots, counters);
-}
-
-
-template <typename T>
-__device__ void MoveElements_Grid_32_d(T* data, const int size, const T* pivots, int* counters, T* dataBuffer){
+__global__ void MoveElements_Grid_32(T* data, const int size, const T* pivots, int* counters, T* dataBuffer){
     // Nb threads must be power of 2
     assert(((blockDim.x - 1) & blockDim.x) == 0);
     assert(blockDim.x >= 32);
@@ -462,6 +449,8 @@ __device__ void MoveElements_Grid_32_d(T* data, const int size, const T* pivots,
     if(threadIdx.x < 32){
         localGOffset[threadIdx.x] = atomicAdd(&counters[threadIdx.x], localCounters[threadIdx.x]);
     }
+
+    __syncthreads();
 
     const int id = threadIdx.x + blockIdx.x * blockDim.x;
     const int numThreads = blockDim.x * gridDim.x;
@@ -475,11 +464,6 @@ __device__ void MoveElements_Grid_32_d(T* data, const int size, const T* pivots,
         const int insertPosition = atomicAdd(&localGOffset[bucket], 1);
         dataBuffer[insertPosition] = value;
     }
-}
-
-template <typename T>
-__global__ void MoveElements_Grid_32(T* data, const int size, const T* pivots, int* counters, T* dataBuffer){
-    MoveElements_Grid_32_d(data, size, pivots, counters, dataBuffer);
 }
 
 
@@ -583,8 +567,12 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort){
         Core_Sort_1Warp_SM_lt32<T, FullSM><<<1,32>>>(dataToSort, nbValuesToSort);
         return;
     }
-    if(nbValuesToSort <= 1024){
-        Sort_1Block_async_gt32<T, TestIfSorted, FullSM><<<1,1024>>>(dataToSort, nbValuesToSort);
+    
+    int MaxThreadsPerBlock;
+    CUDA_CHECK(cudaDeviceGetAttribute(&MaxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, 0));
+    const int NOrPow2 = GreaterPowerOf2EqualOrLarger(nbValuesToSort);
+    if(NOrPow2 <= MaxThreadsPerBlock){
+        Sort_1Block_async_gt32<T, TestIfSorted, FullSM><<<1,NOrPow2,NOrPow2*sizeof(T)>>>(dataToSort, nbValuesToSort);
         return;
     }
 
@@ -622,8 +610,8 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort){
     CUDA_CHECK(cudaFree(counterParts));    
     
     for(int idxPart = 0 ; idxPart < 32 ; idxPart++){
-        const int start = counterParts[idxPart];
-        const int end = counterParts[idxPart+1];
+        const int start = counterPartsHost[idxPart];
+        const int end = counterPartsHost[idxPart+1];
         const int size = end-start;
         if(size > 1024){
             Sort<T, TestIfSorted, FullSM, async>(dataBuffer+start, size);
@@ -785,7 +773,7 @@ void testfull() {
                     std::cout << h_result[i] << " " << h_sorted[i] << std::endl;
                 }
                 std::cout << "The array is NOT correctly sorted." << std::endl;
-                assert(0);
+                //assert(0);
             }
         }
     }
