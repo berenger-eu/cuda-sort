@@ -573,8 +573,33 @@ __global__ void SortPartitions(T* dataToSort, const int nbValuesToSort, const in
 
 template <typename T, bool TestIfSorted, bool FullSM, bool async>
 __host__ void Sort(T* dataToSort, const int nbValuesToSort){
+    T* cpDataToSort = dataToSort;
+    CUDA_CHECK(cudaMalloc(&dataToSort, nbValuesToSort * sizeof(T)));
+    CUDA_CHECK(cudaMemcpy(dataToSort, cpDataToSort, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice));
+
+    std::cout << "===========================================" << std::endl;
+    std::cout << " Sort " << nbValuesToSort << std::endl;
+
+    std::vector<T> allDataToSortHost(nbValuesToSort);// TODO
+    CUDA_CHECK(cudaMemcpy(allDataToSortHost.data(), dataToSort, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToHost));
+    std::sort(allDataToSortHost.begin(), allDataToSortHost.end());
+
     if(nbValuesToSort <= 32){
         Sort_1Warp_SM_lt32<T, FullSM><<<1,32>>>(dataToSort, nbValuesToSort);
+
+        {// TODO
+            std::vector<T> dataSortHost(nbValuesToSort);
+            CUDA_CHECK(cudaMemcpy(dataSortHost.data(), dataToSort, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToHost));
+            for(int i = 0 ; i < nbValuesToSort ; i++){
+                if(dataSortHost[i] != allDataToSortHost[i]){
+                    std::cout << "Not equal" << std::endl;
+                    assert(0);
+                }
+            }
+        }
+        CUDA_CHECK(cudaMemcpy(cpDataToSort, dataToSort, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice));// TODO
+        CUDA_CHECK(cudaFree(dataToSort));// TODO
+
         return;
     }
 
@@ -588,6 +613,20 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort){
         else{
             Sort_1Block_gt32<T, TestIfSorted, FullSM><<<1,NOrPow2,NOrPow2*sizeof(T)>>>(dataToSort, nbValuesToSort);
         }
+
+        {// TODO
+            std::vector<T> dataSortHost(nbValuesToSort);
+            CUDA_CHECK(cudaMemcpy(dataSortHost.data(), dataToSort, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToHost));
+            for(int i = 0 ; i < nbValuesToSort ; i++){
+                if(dataSortHost[i] != allDataToSortHost[i]){
+                    std::cout << "Not equal" << std::endl;
+                    assert(0);
+                }
+            }
+        }
+        CUDA_CHECK(cudaMemcpy(cpDataToSort, dataToSort, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice));// TODO
+        CUDA_CHECK(cudaFree(dataToSort));// TODO
+
         return;
     }
 
@@ -601,6 +640,7 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort){
     Sort_core_buildPivots<T><<<1, 32>>>(dataToSort, nbValuesToSort, pivots);
 
         {// TODO debug
+    CUDA_CHECK(cudaDeviceSynchronize());
             int pivotsHost[32];
             CUDA_CHECK(cudaMemcpy(pivotsHost, pivots, 32 * sizeof(int), cudaMemcpyDeviceToHost));
             std::cout << "pivotsHost: ";
@@ -618,9 +658,10 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort){
     CountParts_Grid_32<T><<< 512, MaxThreadsPerBlock >>>(dataToSort, nbValuesToSort, pivots, counterParts+2);
 
         {// TODO debug
+    CUDA_CHECK(cudaDeviceSynchronize());
             int counterPartsHost[34];
             CUDA_CHECK(cudaMemcpy(counterPartsHost, counterParts, 34 * sizeof(int), cudaMemcpyDeviceToHost));
-            std::cout << "A CounterParts: ";
+            std::cout << "  A CounterParts: ";
             int sum = 0;
             for(int i = 0 ; i < 34 ; i++){
                 std::cout << "[" << i << "]" << counterPartsHost[i] << " ";
@@ -633,15 +674,17 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort){
     BuildPrefix_SM<T, int><<<1,32,32*sizeof(int)>>>(counterParts+2, 32);
 
         {// TODO debug
+    CUDA_CHECK(cudaDeviceSynchronize());
             int counterPartsHost[34];
             CUDA_CHECK(cudaMemcpy(counterPartsHost, counterParts, 34 * sizeof(int), cudaMemcpyDeviceToHost));
-            std::cout << "B CounterParts: ";
+            std::cout << "  B CounterParts: ";
             int sum = 0;
             for(int i = 0 ; i < 34 ; i++){
                 std::cout << "[" << i << "]" << counterPartsHost[i] << " ";
                 sum += counterPartsHost[i];
             }
             std::cout << std::endl;
+            assert(counterPartsHost[33] == nbValuesToSort);
         }
 
     MoveElements_Grid_32<T><<< 512, MaxThreadsPerBlock >>>(dataToSort, nbValuesToSort,
@@ -650,9 +693,53 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort){
                                             dataBuffer);
 
         {
+            CUDA_CHECK(cudaDeviceSynchronize());
+            std::vector<T> dataToSortHost(nbValuesToSort);
+            CUDA_CHECK(cudaMemcpy(dataToSortHost.data(), dataBuffer, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToHost));
+
+            std::sort(dataToSortHost.begin(), dataToSortHost.end());
+
+            if(dataToSortHost != allDataToSortHost){
+                std::cout << "Vectors not equal" << std::endl;
+                for(int i = 0 ; i < nbValuesToSort ; i++){
+                    if(dataToSortHost[i] != allDataToSortHost[i]){
+                        std::cout << "dataToSortHost[" << i << "]=" << dataToSortHost[i] << " != allDataToSortHost[" << i << "]=" << allDataToSortHost[i] << std::endl;
+                    }
+                }
+                assert(0);
+            }
+        }
+
+        {// Check values in partition
+    CUDA_CHECK(cudaDeviceSynchronize());
             int counterPartsHost[34];
             CUDA_CHECK(cudaMemcpy(counterPartsHost, counterParts, 34 * sizeof(int), cudaMemcpyDeviceToHost));
-            std::cout << "C CounterParts: ";
+
+            int pivotsHost[32];
+            CUDA_CHECK(cudaMemcpy(pivotsHost, pivots, 32 * sizeof(int), cudaMemcpyDeviceToHost));
+
+            std::vector<T> dataToSortHost(nbValuesToSort);
+            CUDA_CHECK(cudaMemcpy(dataToSortHost.data(), dataBuffer, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToHost));
+
+            for(int idx = 0 ; idx < 32 ; ++idx){
+                const int start = counterPartsHost[idx];
+                const int end = counterPartsHost[idx+1];
+                const int size = end-start;
+                for(int idxval = start ; idxval < end ; ++idxval){
+                    if(!(pivotsHost[idx] <= dataToSortHost[idxval] && 
+                            (idx == 31 || dataToSortHost[idxval] < pivotsHost[idx+1]))){
+                        std::cout << "out of bound" << std::endl;
+                        assert(0);
+                    }
+                }
+            }
+        }
+
+        {
+            CUDA_CHECK(cudaDeviceSynchronize());
+            int counterPartsHost[34];
+            CUDA_CHECK(cudaMemcpy(counterPartsHost, counterParts, 34 * sizeof(int), cudaMemcpyDeviceToHost));
+            std::cout << "  C CounterParts: ";
             for(int i = 0 ; i < 34 ; i++){
                 std::cout << "[" << i << "]" << counterPartsHost[i] << " ";
             }
@@ -682,25 +769,93 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort){
         }
 
     // Wait for GPU to finish before accessing on host
+    CUDA_CHECK(cudaDeviceSynchronize());
     CUDA_CHECK(cudaMemcpy(dataToSort, dataBuffer, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice));
     CUDA_CHECK(cudaFree(dataBuffer));
     CUDA_CHECK(cudaFree(pivots));
 
     SortPartitions<T, TestIfSorted, FullSM, async><<< 32, MaxThreadsPerBlock, MaxThreadsPerBlock*sizeof(T)>>>(dataToSort, nbValuesToSort, counterParts, 32);
 
-    int counterPartsHost[32];
-    CUDA_CHECK(cudaMemcpy(counterPartsHost, counterParts, 32 * sizeof(int), cudaMemcpyDeviceToHost));
+    {// TODO
+    CUDA_CHECK(cudaDeviceSynchronize());
+        int counterPartsHost[33];
+        CUDA_CHECK(cudaMemcpy(counterPartsHost, counterParts, 33 * sizeof(int), cudaMemcpyDeviceToHost));
+
+        for(int idxPart = 0 ; idxPart < 32 ; idxPart++){
+            const int start = counterPartsHost[idxPart];
+            const int end = counterPartsHost[idxPart+1];
+            const int size = end-start;
+            if(size <= MaxThreadsPerBlock){
+                std::vector<T> dataToSortHost(size);
+                CUDA_CHECK(cudaMemcpy(dataToSortHost.data(), dataToSort+start, size * sizeof(T), cudaMemcpyDeviceToHost));
+
+                // Check it is sorted
+                for(int i = 0 ; i < size ; i++){
+                    if(i && dataToSortHost[i] < dataToSortHost[i-1]){
+                        std::cout << "Not sorted" << std::endl;
+                        assert(0);
+                    }
+                    if(allDataToSortHost[start+i] != dataToSortHost[i]){
+                        std::cout << "Not equal" << std::endl;
+                        assert(0);
+                    }
+                }
+            }
+        }
+    }
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+    int counterPartsHost[33];
+    CUDA_CHECK(cudaMemcpy(counterPartsHost, counterParts, 33 * sizeof(int), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaFree(counterParts));    
     
-    for(int idxPart = 0 ; idxPart < 31 ; idxPart++){
+    for(int idxPart = 0 ; idxPart < 32 ; idxPart++){
         const int start = counterPartsHost[idxPart];
         const int end = counterPartsHost[idxPart+1];
         const int size = end-start;
         if(size > MaxThreadsPerBlock){
             std::cout << "Run Sort start " << start  << " for " << size << " elements" << std::endl;
             Sort<T, TestIfSorted, FullSM, async>(dataToSort+start, size);
+            cudaDeviceSynchronize();
+
+            {// TODO
+                std::vector<T> dataToSortHost(size);
+                CUDA_CHECK(cudaMemcpy(dataToSortHost.data(), dataToSort+start, size * sizeof(T), cudaMemcpyDeviceToHost));
+
+                // Check it is sorted
+                for(int i = 0 ; i < size ; i++){
+                    if(i && dataToSortHost[i] < dataToSortHost[i-1]){
+                        std::cout << "Not sorted" << std::endl;
+                        assert(0);
+                    }
+                    if(allDataToSortHost[start+i] != dataToSortHost[i]){
+                        std::cout << "Not equal" << std::endl;
+                        assert(0);
+                    }
+                }
+            }
         }
     }
+
+    {// TODO
+        std::vector<T> dataToSortHost(nbValuesToSort);
+        CUDA_CHECK(cudaMemcpy(dataToSortHost.data(), dataToSort, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToHost));
+
+        // Check it is sorted
+        for(int i = 0 ; i < nbValuesToSort ; i++){
+            if(i && dataToSortHost[i] < dataToSortHost[i-1]){
+                std::cout << "Not sorted" << std::endl;
+                assert(0);
+            }
+            if(allDataToSortHost[i] != dataToSortHost[i]){
+                std::cout << "Not equal" << std::endl;
+                assert(0);
+            }
+        }
+    }
+    CUDA_CHECK(cudaMemcpy(cpDataToSort, dataToSort, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice));// TODO
+    CUDA_CHECK(cudaFree(dataToSort));// TODO
+    CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 
@@ -717,11 +872,12 @@ void test() {
     int MaxThreadsPerBlock;
     CUDA_CHECK(cudaDeviceGetAttribute(&MaxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, 0));
     std::cout << "Max threads per block: " << MaxThreadsPerBlock << std::endl;
+    MaxThreadsPerBlock /= 2; // Does not work otherwise
     // Limit the size to this value
     const int MaxSize = std::min(int(MaxSharedMemSize / sizeof(int)), MaxThreadsPerBlock);
     std::cout << "Max size: " << MaxSize << std::endl;
 
-    for(int idxSize = 32 ; idxSize < MaxSize ; idxSize *= 2){
+    for(int idxSize = 32 ; idxSize <= MaxSize ; idxSize *= 2){
         for(const bool randValues : {false, true}){
             // Number of elements to sort
             const int N = idxSize;
@@ -774,6 +930,140 @@ void test() {
             else{
                 Sort_1Block_gt32<int, TestIfSorted, FullSM><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_array, N);
             }
+
+            // Wait for GPU to finish before accessing on host
+            CUDA_CHECK(cudaDeviceSynchronize());
+
+            // Copy the (supposedly sorted) array back from device to host
+            std::vector<int> h_result(N);
+            CUDA_CHECK(cudaMemcpy(h_result.data(), d_array, N * sizeof(int), cudaMemcpyDeviceToHost));
+
+            // Free device memory
+            CUDA_CHECK(cudaFree(d_array));
+
+            // Verify that the device result matches the sorted host array
+            if (h_result != h_sorted) {
+                for(int i = 0 ; i < N ; i++){
+                    std::cout << h_result[i] << " " << h_sorted[i] << std::endl;
+                }
+                std::cout << "The array is NOT correctly sorted." << std::endl;
+                assert(0);
+            }
+        }
+    }
+
+
+    for(int idxSize = 32 ; idxSize <= MaxSize ; idxSize *= 3){
+        for(const bool randValues : {false, true}){
+            // Number of elements to sort
+            const int N = idxSize;
+            assert(N <= MaxSharedMemSize / sizeof(int));
+            const int NOrPow2 = GreaterPowerOf2EqualOrLarger(N);
+            assert(((NOrPow2-1) & NOrPow2) == 0);
+            assert(NOrPow2 <= MaxSharedMemSize / sizeof(int));
+
+            std::cout << "Testing with " << N << " elements" << std::endl;
+            std::cout << " - Number of threads: " << NOrPow2 << std::endl;
+            std::cout << " - Shared memory size: " << NOrPow2 * sizeof(int) << std::endl;
+
+            std::vector<int> h_array(N);
+            if(randValues){
+                // Create a host vector and fill it with random values (using C++11 random)
+                std::random_device rd;
+                std::mt19937 gen(0);
+                std::uniform_int_distribution<int> dis(0, 10000);
+                for (int i = 0; i < N; ++i) {
+                    h_array[i] = dis(gen);
+                }
+            }
+            else{
+                for (int i = 0; i < N; ++i) {
+                    h_array[i] = N-i;
+                }
+            }
+
+            // Make a copy of the host array and sort it using std::sort for later verification.
+            std::vector<int> h_sorted = h_array;
+            std::sort(h_sorted.begin(), h_sorted.end());
+
+            // Allocate device memory for the array
+            int* d_array = nullptr;
+            CUDA_CHECK(cudaMalloc(&d_array, N * sizeof(int)));
+
+            // Copy data from host to device
+            CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), N * sizeof(int), cudaMemcpyHostToDevice));
+
+            // Define execution configuration (threads per block and blocks per grid)
+            const int threadsPerBlock = NOrPow2;
+            const int blocksPerGrid = 1;//(N + threadsPerBlock - 1) / threadsPerBlock;
+
+            // Launch the sort kernel (template instantiated for int)
+            const int sharedMemSize = NOrPow2 * sizeof(int);
+
+            if constexpr(async){
+                Sort_1Block_async_gt32<int, TestIfSorted, FullSM><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_array, N);
+            }
+            else{
+                Sort_1Block_gt32<int, TestIfSorted, FullSM><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_array, N);
+            }
+
+            // Wait for GPU to finish before accessing on host
+            CUDA_CHECK(cudaDeviceSynchronize());
+
+            // Copy the (supposedly sorted) array back from device to host
+            std::vector<int> h_result(N);
+            CUDA_CHECK(cudaMemcpy(h_result.data(), d_array, N * sizeof(int), cudaMemcpyDeviceToHost));
+
+            // Free device memory
+            CUDA_CHECK(cudaFree(d_array));
+
+            // Verify that the device result matches the sorted host array
+            if (h_result != h_sorted) {
+                for(int i = 0 ; i < N ; i++){
+                    std::cout << h_result[i] << " " << h_sorted[i] << std::endl;
+                }
+                std::cout << "The array is NOT correctly sorted." << std::endl;
+                assert(0);
+            }
+        }
+    }
+
+
+    for(int idxSize = 1 ; idxSize <= 32 ; ++idxSize){
+        for(const bool randValues : {false, true}){
+            // Number of elements to sort
+            const int N = idxSize;
+
+            std::cout << "Testing with " << N << " elements" << std::endl;
+
+            std::vector<int> h_array(N);
+            if(randValues){
+                // Create a host vector and fill it with random values (using C++11 random)
+                std::random_device rd;
+                std::mt19937 gen(0);
+                std::uniform_int_distribution<int> dis(0, 10000);
+                for (int i = 0; i < N; ++i) {
+                    h_array[i] = dis(gen);
+                }
+            }
+            else{
+                for (int i = 0; i < N; ++i) {
+                    h_array[i] = N-i;
+                }
+            }
+
+            // Make a copy of the host array and sort it using std::sort for later verification.
+            std::vector<int> h_sorted = h_array;
+            std::sort(h_sorted.begin(), h_sorted.end());
+
+            // Allocate device memory for the array
+            int* d_array = nullptr;
+            CUDA_CHECK(cudaMalloc(&d_array, N * sizeof(int)));
+
+            // Copy data from host to device
+            CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), N * sizeof(int), cudaMemcpyHostToDevice));
+
+            Sort_1Warp_SM_lt32<int, FullSM><<<1,32>>>(d_array, N);
 
             // Wait for GPU to finish before accessing on host
             CUDA_CHECK(cudaDeviceSynchronize());
@@ -879,14 +1169,14 @@ int main() {
         return 0;
     }
     if(true){
-        testfull<true, true, true>();
+        //testfull<true, true, true>();
         // testfull<true, true, false>();
         // testfull<true, false, true>();
         // testfull<true, false, false>();
         // testfull<false, true, true>();
         // testfull<false, true, false>();
         // testfull<false, false, true>();
-        //testfull<false, false, false>();
+        testfull<false, false, false>();
     }
     return 0;
 }
