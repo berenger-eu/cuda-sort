@@ -77,7 +77,7 @@ __device__ __forceinline__ bool TestIfSorted_1Block(const T* dataToSort, const i
     }
     __syncthreads();
     if(!localIsSorted){
-        isSorted = false;
+        atomicExch((int*)&isSorted, 0);
     }
     __syncthreads();
     return isSorted;
@@ -114,6 +114,7 @@ __device__ __forceinline__ void Core_Sort_1Warp_SM_lt32_d(T* dataToSort, const i
                 const int vecpermute = threadIdx.x + vecincout;
                 const T a = dataToSort[threadIdx.x];
                 const T b = dataToSort[vecpermute];
+                __syncwarp(0xffffffff);
                 const T best = (ffttout ? max(a, b) : min(a, b));
                 dataToSort[threadIdx.x] = best;
                 __syncwarp(0xffffffff);
@@ -126,6 +127,7 @@ __device__ __forceinline__ void Core_Sort_1Warp_SM_lt32_d(T* dataToSort, const i
                 const int vecpermute = (threadIdx.x + vecincout2);
                 const T a = dataToSort[threadIdx.x];
                 const T b = dataToSort[vecpermute];
+                __syncwarp(0xffffffff);
                 const T best = (fftt ? max(a, b) : min(a, b));
                 dataToSort[threadIdx.x] = best;
                 __syncwarp(0xffffffff);
@@ -170,6 +172,7 @@ __device__ void Sort_1Warp_SM_lt32_d(T* dataToSort, const int nbValuesToSort){
     __syncthreads();
     // Sort
     Core_Sort_1Warp_SM_lt32_d<T, FullSM>(shared, nbValuesToSort);
+    __syncthreads();
     // Copy back
     if(threadIdx.x < nbValuesToSort){
         dataToSort[threadIdx.x] = shared[threadIdx.x];
@@ -204,6 +207,7 @@ __device__ __forceinline__ void Core_Sort_1Block_SM_gt32_d(T* dataToSort, const 
                 const int vecpermute = threadIdx.x + vecincout;
                 const T a = dataToSort[threadIdx.x];
                 const T b = dataToSort[vecpermute];
+                __syncwarp(0xffffffff);
                 const T best = (ffttout ? max(a, b) : min(a, b));
                 dataToSort[threadIdx.x] = best;
                 __syncwarp(0xffffffff);
@@ -216,6 +220,7 @@ __device__ __forceinline__ void Core_Sort_1Block_SM_gt32_d(T* dataToSort, const 
                 const int vecpermute = (threadIdx.x + vecincout2);
                 const T a = dataToSort[threadIdx.x];
                 const T b = dataToSort[vecpermute];
+                __syncwarp(0xffffffff);
                 const T best = (fftt ? max(a, b) : min(a, b));
                 dataToSort[threadIdx.x] = best;
                 __syncwarp(0xffffffff);
@@ -259,6 +264,7 @@ __device__ __forceinline__ void Core_Sort_1Block_SM_gt32_d(T* dataToSort, const 
             const int vecpermute = threadIdx.x + vecincout;
             const T a = dataToSort[threadIdx.x];
             const T b = dataToSort[vecpermute];
+            __syncthreads();
             const T best = (ffttout ? max(a, b) : min(a, b));
             dataToSort[threadIdx.x] = best;
             __syncthreads();
@@ -271,6 +277,7 @@ __device__ __forceinline__ void Core_Sort_1Block_SM_gt32_d(T* dataToSort, const 
             const int vecpermute = (threadIdx.x + vecincout2);
             const T a = dataToSort[threadIdx.x];
             const T b = dataToSort[vecpermute];
+            __syncthreads();
             const T best = (fftt ? max(a, b) : min(a, b));
             dataToSort[threadIdx.x] = best;
             __syncthreads();
@@ -284,6 +291,7 @@ __device__ __forceinline__ void Core_Sort_1Block_SM_gt32_d(T* dataToSort, const 
                 const int vecpermute = (threadIdx.x + vecincout2);
                 const T a = dataToSort[threadIdx.x];
                 const T b = dataToSort[vecpermute];
+                __syncthreads();
                 const T best = (fftt ? max(a, b) : min(a, b));
                 dataToSort[threadIdx.x] = best;
                 __syncwarp(0xffffffff);
@@ -299,6 +307,7 @@ __device__ __forceinline__ void Core_Sort_1Block_SM_gt32_d(T* dataToSort, const 
                 const T b = __shfl_sync(fullMask, a, vecpermute);
                 a = (fftt ? max(a, b) : min(a, b));
             }
+            __syncthreads();
             dataToSort[threadIdx.x] = a;
         }
         __syncthreads();
@@ -356,6 +365,7 @@ __device__ void Sort_1Block_async_gt32_d(T* dataToSort, const int nbValuesToSort
     if (threadIdx.x == 0) {
         init(&bar, block.size());
     }
+    __syncthreads();
     block.sync(); // Ensure all threads see the initialized barrier
 
     // Asynchronous copy from global to shared memory.
