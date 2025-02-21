@@ -562,7 +562,7 @@ __global__ void Sort_core_buildPivots(T* dataToSort, const int nbValuesToSort, T
     }
 }
 
-template <typename T, bool TestIfSorted, bool FullSM, bool async>
+template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito>
 __global__ void SortPartitions(T* dataToSort, const int nbValuesToSort, const int counterParts[], const int nbParts){
     for(int idxPart = blockIdx.x ; idxPart < nbParts; idxPart += gridDim.x){
         const int start = counterParts[idxPart];
@@ -572,7 +572,7 @@ __global__ void SortPartitions(T* dataToSort, const int nbValuesToSort, const in
             Sort_1Warp_SM_lt32_d<T, FullSM>(dataToSort+start, size);
         }
         else if(size <= blockDim.x){
-            if constexpr(async){
+            if constexpr(ASyncCpyBito){
                 Sort_1Block_async_gt32_d<T, TestIfSorted, FullSM>(dataToSort+start, size);
             }
             else{
@@ -583,7 +583,7 @@ __global__ void SortPartitions(T* dataToSort, const int nbValuesToSort, const in
 }
 
 
-template <typename T, bool TestIfSorted, bool FullSM, bool async>
+template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito>
 __host__ void Sort(T* dataToSort, const int nbValuesToSort){
     if(nbValuesToSort <= 32){
         Sort_1Warp_SM_lt32<T, FullSM><<<1,32>>>(dataToSort, nbValuesToSort);
@@ -594,7 +594,7 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort){
     // TODO CUDA_CHECK(cudaDeviceGetAttribute(&MaxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, 0));
     const int NOrPow2 = GreaterPowerOf2EqualOrLarger(nbValuesToSort);
     if(NOrPow2 <= MaxThreadsPerBlock){
-        if constexpr(async){
+        if constexpr(ASyncCpyBito){
             Sort_1Block_async_gt32<T, TestIfSorted, FullSM><<<1,NOrPow2,NOrPow2*sizeof(T)>>>(dataToSort, nbValuesToSort);
         }
         else{
@@ -632,7 +632,7 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort){
     CUDA_CHECK(cudaFree(dataBuffer));
     CUDA_CHECK(cudaFree(pivots));
 
-    SortPartitions<T, TestIfSorted, FullSM, async><<< 32, MaxThreadsPerBlock, MaxThreadsPerBlock*sizeof(T)>>>(dataToSort, nbValuesToSort, counterParts, 32);
+    SortPartitions<T, TestIfSorted, FullSM, ASyncCpyBito><<< 32, MaxThreadsPerBlock, MaxThreadsPerBlock*sizeof(T)>>>(dataToSort, nbValuesToSort, counterParts, 32);
 
     CUDA_CHECK(cudaDeviceSynchronize());
     int counterPartsHost[33];
@@ -644,7 +644,7 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort){
         const int end = counterPartsHost[idxPart+1];
         const int size = end-start;
         if(size > MaxThreadsPerBlock){
-            Sort<T, TestIfSorted, FullSM, async>(dataToSort+start, size);
+            Sort<T, TestIfSorted, FullSM, ASyncCpyBito>(dataToSort+start, size);
         }
     }
 }
@@ -653,7 +653,7 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort){
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
 
-template<bool TestIfSorted, bool FullSM, bool async>
+template<bool TestIfSorted, bool FullSM, bool ASyncCpyBito>
 void test() {
     // Size of the shared memory on the device, calling cuda api
     int MaxSharedMemSize;
@@ -715,7 +715,7 @@ void test() {
             // Launch the sort kernel (template instantiated for int)
             const int sharedMemSize = NOrPow2 * sizeof(int);
 
-            if constexpr(async){
+            if constexpr(ASyncCpyBito){
                 Sort_1Block_async_gt32<int, TestIfSorted, FullSM><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_array, N);
             }
             else{
@@ -791,7 +791,7 @@ void test() {
             // Launch the sort kernel (template instantiated for int)
             const int sharedMemSize = NOrPow2 * sizeof(int);
 
-            if constexpr(async){
+            if constexpr(ASyncCpyBito){
                 Sort_1Block_async_gt32<int, TestIfSorted, FullSM><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_array, N);
             }
             else{
@@ -878,7 +878,7 @@ void test() {
     }
 }
 
-template<bool TestIfSorted, bool FullSM, bool async>
+template<bool TestIfSorted, bool FullSM, bool ASyncCpyBito>
 void testfull() {
     // Limit the size to this value
     const int MaxSize = (1 << 20);
@@ -920,7 +920,7 @@ void testfull() {
             // Copy data from host to device
             CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), N * sizeof(int), cudaMemcpyHostToDevice));
 
-            Sort<int, TestIfSorted, FullSM, async>(d_array, N);
+            Sort<int, TestIfSorted, FullSM, ASyncCpyBito>(d_array, N);
 
             // Wait for GPU to finish before accessing on host
             CUDA_CHECK(cudaDeviceSynchronize());
