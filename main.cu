@@ -11,6 +11,8 @@
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
 
+constexpr const int DefaultNbThreadsPerBlock = 512;
+
 void CUDA_CHECK(cudaError_t err) {
     if (err != cudaSuccess) {
         std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
@@ -588,7 +590,7 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort){
         return;
     }
 
-    int MaxThreadsPerBlock = 512;
+    int MaxThreadsPerBlock = DefaultNbThreadsPerBlock;
     // TODO CUDA_CHECK(cudaDeviceGetAttribute(&MaxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, 0));
     const int NOrPow2 = GreaterPowerOf2EqualOrLarger(nbValuesToSort);
     if(NOrPow2 <= MaxThreadsPerBlock){
@@ -614,11 +616,12 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort){
     CUDA_CHECK(cudaMalloc(&counterParts, 34 * sizeof(int)));
     CUDA_CHECK(cudaMemset(counterParts, 0, 34 * sizeof(int)));
 
-    CountParts_Grid_32<T><<< 512, MaxThreadsPerBlock >>>(dataToSort, nbValuesToSort, pivots, counterParts+2);
+    const int nbThreadBlock = (nbValuesToSort+MaxThreadsPerBlock-1)/MaxThreadsPerBlock;
+    CountParts_Grid_32<T><<< nbThreadBlock, MaxThreadsPerBlock >>>(dataToSort, nbValuesToSort, pivots, counterParts+2);
 
     BuildPrefix_SM<T, int><<<1,32,32*sizeof(int)>>>(counterParts+2, 32);
 
-    MoveElements_Grid_32<T><<< 512, MaxThreadsPerBlock >>>(dataToSort, nbValuesToSort,
+    MoveElements_Grid_32<T><<< nbThreadBlock, MaxThreadsPerBlock >>>(dataToSort, nbValuesToSort,
                                             pivots,
                                             counterParts+1,
                                             dataBuffer);
