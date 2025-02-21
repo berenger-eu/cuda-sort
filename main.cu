@@ -164,10 +164,10 @@ __device__ void Sort_1Warp_SM_lt32_d(T* dataToSort, const int nbValuesToSort){
     if(threadIdx.x < nbValuesToSort){
         shared[threadIdx.x] = dataToSort[threadIdx.x];
     }
-    else{
+    else if(threadIdx.x < 32){
         shared[threadIdx.x] = my_numeric_limits_max<T>();
     }
-    // Not needed __syncthreads();
+    __syncthreads();
     // Sort
     Core_Sort_1Warp_SM_lt32_d<T, FullSM>(shared, nbValuesToSort);
     // Copy back
