@@ -414,12 +414,12 @@ __forceinline__ __device__ int binarySearch(const T pivots[], const int nbPivots
 }
 
 
-template <typename T>
-__device__ void CountParts_Grid_32_core(const T* data, const int size, const T pivots[32], int* counters,
-                                                   int localCounters[32]){
-    __shared__ T localPivots[32];
+template <typename T, int MaxParts>
+__device__ void CountParts_Grid_core(const T* data, const int size, const T* pivots, int* counters,
+                                                   int* localCounters, const int nbParts){
+    __shared__ T localPivots[MaxParts];
 
-    if(threadIdx.x < 32){
+    if(threadIdx.x < nbParts){
         localPivots[threadIdx.x] = pivots[threadIdx.x];
         localCounters[threadIdx.x] = 0;
     }
@@ -432,8 +432,8 @@ __device__ void CountParts_Grid_32_core(const T* data, const int size, const T p
         const T value = data[idxValue];
 
         // Binary search on pivots
-        const int bucket = binarySearch(localPivots, 32, value);
-        assert(0 <= bucket && bucket < 32);
+        const int bucket = binarySearch(localPivots, nbParts, value);
+        assert(0 <= bucket && bucket < nbParts);
         atomicAdd(&localCounters[bucket], 1);
     }
 
@@ -441,32 +441,32 @@ __device__ void CountParts_Grid_32_core(const T* data, const int size, const T p
 }
 
 
-template <typename T>
-__global__ void CountParts_Grid_32(const T* data, const int size, const T* pivots, int* counters){
+template <typename T, int MaxParts>
+__global__ void CountParts_Grid(const T* data, const int size, const T* pivots, int* counters, const int nbParts){
     // Nb threads must be power of 2
     assert(((blockDim.x - 1) & blockDim.x) == 0);
-    assert(blockDim.x >= 32);
+    assert(blockDim.x >= nbParts);
 
-    __shared__ int localCounters[32];
-    CountParts_Grid_32_core(data, size, pivots, counters, localCounters);
+    __shared__ int localCounters[MaxParts];
+    CountParts_Grid_core<T, MaxParts>(data, size, pivots, counters, localCounters, nbParts);
 
-    if(threadIdx.x < 32){
+    if(threadIdx.x < nbParts){
         atomicAdd(&counters[threadIdx.x], localCounters[threadIdx.x]);
     }
 }
 
-template <typename T>
-__global__ void MoveElements_Grid_32(T* data, const int size, const T* pivots, int* counters, T* dataBuffer){
+template <typename T, int MaxParts>
+__global__ void MoveElements_Grid(T* data, const int size, const T* pivots, int* counters, T* dataBuffer, const int nbParts){
     // Nb threads must be power of 2
     assert(((blockDim.x - 1) & blockDim.x) == 0);
-    assert(blockDim.x >= 32);
+    assert(blockDim.x >= nbParts);
 
-    __shared__ int localCounters[32];
-    CountParts_Grid_32_core(data, size, pivots, counters, localCounters);
+    __shared__ int localCounters[MaxParts];
+    CountParts_Grid_core<T, MaxParts>(data, size, pivots, counters, localCounters, nbParts);
     __syncthreads();
 
-    __shared__ int localGOffset[32];
-    if(threadIdx.x < 32){
+    __shared__ int localGOffset[MaxParts];
+    if(threadIdx.x < nbParts){
         localGOffset[threadIdx.x] = atomicAdd(&counters[threadIdx.x], localCounters[threadIdx.x]);
     }
 
@@ -479,8 +479,8 @@ __global__ void MoveElements_Grid_32(T* data, const int size, const T* pivots, i
         const T value = data[idxValue];
 
         // Binary search on pivots
-        const int bucket = binarySearch(pivots, 32, value);
-        assert(0 <= bucket && bucket < 32);
+        const int bucket = binarySearch(pivots, nbParts, value);
+        assert(0 <= bucket && bucket < nbParts);
         const int insertPosition = atomicAdd(&localGOffset[bucket], 1);
         dataBuffer[insertPosition] = value;
     }
@@ -516,9 +516,9 @@ __device__ void BuildPrefix_SM_device(ElementType* prefix, IndexType N) {
     }
 }
 
-template <typename NumType, typename IndexType>
+template <typename NumType, typename IndexType, const int MaxNbParts>
 __global__ void BuildPrefix_SM( NumType* prefixTree, const IndexType inSize){
-    extern __shared__ IndexType buffer[];
+    __shared__ IndexType buffer[MaxNbParts];
 
     for(IndexType idx = threadIdx.x ; idx < inSize ; idx += blockDim.x){
         buffer[idx] = prefixTree[idx];
@@ -536,29 +536,36 @@ __global__ void BuildPrefix_SM( NumType* prefixTree, const IndexType inSize){
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
 
-template <typename T>
-__global__ void Sort_core_buildPivots(T* dataToSort, const int nbValuesToSort, T* pivots){
+template <typename T, int MaxParts>
+__global__ void Sort_core_buildPivots(T* dataToSort, const int nbValuesToSort, T* pivots, const int nbParts){
     // We copy values from the array to build the partition
     assert(gridDim.x == 1);
-    {
-        __shared__ T localPivots[32];
-        
-        if(threadIdx.x < 32){
-            const int step = nbValuesToSort/33;
-            localPivots[threadIdx.x] = dataToSort[min(nbValuesToSort-1, step*threadIdx.x)];
-        }
-        if(threadIdx.x == 0){
-            localPivots[0] = my_numeric_limits_min<T>();
-        }
-        __syncwarp(0xffffffff);
-        Core_Sort_1Warp_SM_lt32_d<T, true>(localPivots, 32);
-
-        // Not needed __syncthreads();
+    assert(nbParts <= MaxParts);
+    __shared__ T localPivots[MaxParts];
     
-        __syncwarp(0xffffffff);
-        if(threadIdx.x < 32){
-            pivots[threadIdx.x] = localPivots[threadIdx.x];
-        }
+    if(threadIdx.x < nbParts){
+        const int step = nbValuesToSort/(nbParts+1);
+        localPivots[threadIdx.x] = dataToSort[min(nbValuesToSort-1, step*threadIdx.x)];
+    }
+    else if(threadIdx.x < MaxParts){
+        localPivots[threadIdx.x] = my_numeric_limits_max<T>();
+    }
+    if(threadIdx.x == 0){
+        localPivots[0] = my_numeric_limits_min<T>();
+    }
+    
+    __syncthreads();
+
+    if(nbParts <= 32){
+        Core_Sort_1Warp_SM_lt32_d<T, true>(localPivots, nbParts);
+    }
+    else{
+        Core_Sort_1Block_SM_gt32_d<T, false, false>(localPivots, nbParts);
+    }
+
+    __syncthreads();
+    if(threadIdx.x < nbParts){
+        pivots[threadIdx.x] = localPivots[threadIdx.x];
     }
 }
 
@@ -583,8 +590,10 @@ __global__ void SortPartitions(T* dataToSort, const int nbValuesToSort, const in
 }
 
 
-template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito>
+template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito, int MinNbParts = 32, int MaxNbParts = 64>
 __host__ void Sort(T* dataToSort, const int nbValuesToSort){
+    static_assert(MaxNbParts <= DefaultNbThreadsPerBlock);
+
     if(nbValuesToSort <= 32){
         Sort_1Warp_SM_lt32<T, FullSM><<<1,32>>>(dataToSort, nbValuesToSort);
         return;
@@ -603,28 +612,37 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort){
         return;
     }
 
+    const int NbParts = std::min(MaxNbParts, std::max(MinNbParts, nbValuesToSort/MaxThreadsPerBlock));
+    const int NbPartsPow2 = GreaterPowerOf2EqualOrLarger(NbParts);
+
     int* dataBuffer = nullptr;
     CUDA_CHECK(cudaMalloc(&dataBuffer, nbValuesToSort * sizeof(T)));
 
     int* pivots = nullptr;
-    CUDA_CHECK(cudaMalloc(&pivots, 32 * sizeof(int)));
-    CUDA_CHECK(cudaMemset(pivots, 0, 32 * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&pivots, NbParts * sizeof(int)));
+    CUDA_CHECK(cudaMemset(pivots, 0, NbParts * sizeof(int)));
 
-    Sort_core_buildPivots<T><<<1, 32>>>(dataToSort, nbValuesToSort, pivots);
+    Sort_core_buildPivots<T, MaxNbParts><<<1, NbPartsPow2 >>>(dataToSort, nbValuesToSort, pivots, NbParts);
 
     int* counterParts = nullptr;
-    CUDA_CHECK(cudaMalloc(&counterParts, 34 * sizeof(int)));
-    CUDA_CHECK(cudaMemset(counterParts, 0, 34 * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&counterParts, (NbParts+2) * sizeof(int)));
+    CUDA_CHECK(cudaMemset(counterParts, 0, (NbParts+2) * sizeof(int)));
 
     const int nbThreadBlock = (nbValuesToSort+MaxThreadsPerBlock-1)/MaxThreadsPerBlock;
-    CountParts_Grid_32<T><<< nbThreadBlock, MaxThreadsPerBlock >>>(dataToSort, nbValuesToSort, pivots, counterParts+2);
+    CountParts_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock >>>(dataToSort, nbValuesToSort, pivots, counterParts+2, NbParts);
 
-    BuildPrefix_SM<T, int><<<1,32,32*sizeof(int)>>>(counterParts+2, 32);
 
-    MoveElements_Grid_32<T><<< nbThreadBlock, MaxThreadsPerBlock >>>(dataToSort, nbValuesToSort,
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    BuildPrefix_SM<T, int, MaxNbParts><<<1,NbParts>>>(counterParts+2, NbParts);
+
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    MoveElements_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock >>>(dataToSort, nbValuesToSort,
                                             pivots,
                                             counterParts+1,
-                                            dataBuffer);
+                                            dataBuffer, NbParts);
 
     // Wait for GPU to finish before accessing on host
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -632,19 +650,19 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort){
     CUDA_CHECK(cudaFree(dataBuffer));
     CUDA_CHECK(cudaFree(pivots));
 
-    SortPartitions<T, TestIfSorted, FullSM, ASyncCpyBito><<< 32, MaxThreadsPerBlock, MaxThreadsPerBlock*sizeof(T)>>>(dataToSort, nbValuesToSort, counterParts, 32);
+    SortPartitions<T, TestIfSorted, FullSM, ASyncCpyBito><<< NbParts, MaxThreadsPerBlock, MaxThreadsPerBlock*sizeof(T)>>>(dataToSort, nbValuesToSort, counterParts, NbParts);
 
     CUDA_CHECK(cudaDeviceSynchronize());
-    int counterPartsHost[33];
-    CUDA_CHECK(cudaMemcpy(counterPartsHost, counterParts, 33 * sizeof(int), cudaMemcpyDeviceToHost));
+    int counterPartsHost[NbParts+1];
+    CUDA_CHECK(cudaMemcpy(counterPartsHost, counterParts, (NbParts+1) * sizeof(int), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaFree(counterParts));    
     
-    for(int idxPart = 0 ; idxPart < 32 ; idxPart++){
+    for(int idxPart = 0 ; idxPart < NbParts ; idxPart++){
         const int start = counterPartsHost[idxPart];
         const int end = counterPartsHost[idxPart+1];
         const int size = end-start;
         if(size > MaxThreadsPerBlock){
-            Sort<T, TestIfSorted, FullSM, ASyncCpyBito>(dataToSort+start, size);
+            Sort<T, TestIfSorted, FullSM, ASyncCpyBito, MinNbParts, MaxNbParts>(dataToSort+start, size);
         }
     }
 }
