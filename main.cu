@@ -1018,7 +1018,7 @@ __global__ void benchmarkSortSmall(T* dataToSort, const int nbValuesToSort) {
 }
 
 
-void benmark(){
+void benmark32(){
     // Get amount of free global memory
     size_t freeMem, totalMem;
     CUDA_CHECK(cudaMemGetInfo(&freeMem, &totalMem));
@@ -1034,62 +1034,115 @@ void benmark(){
     for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
         for(int idxSizePerWarp = 1 ; idxSizePerWarp <= 32 ; ++idxSizePerWarp){
             for(int idxLoop = 0 ; idxLoop < 10 ; ++idxLoop){
-                std::cout << "idxInitData: " << idxInitData << " idxSizePerWarp: " << idxSizePerWarp << " idxLoop: " << idxLoop << std::endl;
+                {
+                    std::cout << "idxInitData: " << idxInitData << " idxSizePerWarp: " << idxSizePerWarp << " idxLoop: " << idxLoop << std::endl;
 
 
-                if(idxInitData == RANDOM){
-                    std::random_device rd;
-                    std::mt19937 gen(0);
-                    std::uniform_int_distribution<int> dis(0, 1000000);
-                    for (int i = 0; i < int(h_array.size()); ++i) {
-                        h_array[i] = dis(gen);
+                    if(idxInitData == RANDOM){
+                        std::random_device rd;
+                        std::mt19937 gen(0);
+                        std::uniform_int_distribution<int> dis(0, 1000000);
+                        for (int i = 0; i < int(h_array.size()); ++i) {
+                            h_array[i] = dis(gen);
+                        }
                     }
-                }
-                else if(idxInitData == SORTED){
-                    for (int i = 0; i < int(h_array.size()); ++i) {
-                        h_array[i] = i%32;
+                    else if(idxInitData == SORTED){
+                        for (int i = 0; i < int(h_array.size()); ++i) {
+                            h_array[i] = i%32;
+                        }
                     }
-                }
-                else if(idxInitData == REVERSED){
-                    for (int i = 0; i < int(h_array.size()); ++i) {
-                        h_array[i] = 31-i%32;
+                    else if(idxInitData == REVERSED){
+                        for (int i = 0; i < int(h_array.size()); ++i) {
+                            h_array[i] = 31-i%32;
+                        }
                     }
+                    else{
+                        assert(0);
+                    }
+
+                    // Allocate device memory for the array
+                    int* d_array = nullptr;
+                    CUDA_CHECK(cudaMalloc(&d_array, h_array.size() * sizeof(int)));
+
+                    // Copy data from host to device
+                    CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), h_array.size() * sizeof(int), cudaMemcpyHostToDevice));
+
+                    // Define execution configuration (threads per block and blocks per grid)
+                    const int threadsPerBlock = 32;
+                    const int blocksPerGrid = nbBlocks;
+
+                    CUDA_CHECK(cudaDeviceSynchronize());
+                    SpTimer timer;
+
+                    benchmarkSortSmall<int, true><<<blocksPerGrid, threadsPerBlock>>>(d_array, idxSizePerWarp);
+
+                    CUDA_CHECK(cudaDeviceSynchronize());
+                    timer.stop();
+
+                    std::cout << "Time: " << timer.getElapsed() << "s" << std::endl;
+                    std::cout << "    - by sort : " << timer.getElapsed()/nbBlocks << "s" << std::endl;
+
+                    // Free device memory
+                    CUDA_CHECK(cudaFree(d_array));
                 }
-                else{
-                    assert(0);
+                {
+                    std::cout << "idxInitData: " << idxInitData << " idxSizePerWarp: " << idxSizePerWarp << " idxLoop: " << idxLoop << std::endl;
+
+
+                    if(idxInitData == RANDOM){
+                        std::random_device rd;
+                        std::mt19937 gen(0);
+                        std::uniform_int_distribution<int> dis(0, 1000000);
+                        for (int i = 0; i < int(h_array.size()); ++i) {
+                            h_array[i] = dis(gen);
+                        }
+                    }
+                    else if(idxInitData == SORTED){
+                        for (int i = 0; i < int(h_array.size()); ++i) {
+                            h_array[i] = i%32;
+                        }
+                    }
+                    else if(idxInitData == REVERSED){
+                        for (int i = 0; i < int(h_array.size()); ++i) {
+                            h_array[i] = 31-i%32;
+                        }
+                    }
+                    else{
+                        assert(0);
+                    }
+
+                    // Allocate device memory for the array
+                    int* d_array = nullptr;
+                    CUDA_CHECK(cudaMalloc(&d_array, h_array.size() * sizeof(int)));
+
+                    // Copy data from host to device
+                    CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), h_array.size() * sizeof(int), cudaMemcpyHostToDevice));
+
+                    // Define execution configuration (threads per block and blocks per grid)
+                    const int threadsPerBlock = 32;
+                    const int blocksPerGrid = nbBlocks;
+
+                    CUDA_CHECK(cudaDeviceSynchronize());
+                    SpTimer timer;
+
+                    benchmarkSortSmall<int, false><<<blocksPerGrid, threadsPerBlock>>>(d_array, idxSizePerWarp);
+
+                    CUDA_CHECK(cudaDeviceSynchronize());
+                    timer.stop();
+
+                    std::cout << "Time: " << timer.getElapsed() << "s" << std::endl;
+                    std::cout << "    - by sort : " << timer.getElapsed()/nbBlocks << "s" << std::endl;
+
+                    // Free device memory
+                    CUDA_CHECK(cudaFree(d_array));
                 }
-
-                // Allocate device memory for the array
-                int* d_array = nullptr;
-                CUDA_CHECK(cudaMalloc(&d_array, h_array.size() * sizeof(int)));
-
-                // Copy data from host to device
-                CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), h_array.size() * sizeof(int), cudaMemcpyHostToDevice));
-
-                // Define execution configuration (threads per block and blocks per grid)
-                const int threadsPerBlock = 32;
-                const int blocksPerGrid = nbBlocks;
-
-                CUDA_CHECK(cudaDeviceSynchronize());
-                SpTimer timer;
-
-                benchmarkSortSmall<int, true><<<blocksPerGrid, threadsPerBlock>>>(d_array, idxSizePerWarp);
-
-                CUDA_CHECK(cudaDeviceSynchronize());
-                timer.stop();
-
-                std::cout << "Time: " << timer.getElapsed() << "s" << std::endl;
-                std::cout << "    - by sort : " << timer.getElapsed()/nbBlocks << "s" << std::endl;
-
-                // Free device memory
-                CUDA_CHECK(cudaFree(d_array));
             }
         }
     }
 }
 
 void benchmarkAll(){
-    benmark();
+    benmark32();
 }
 
 ////////////////////////////////////////////////////////////////////
