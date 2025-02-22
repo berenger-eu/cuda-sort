@@ -1226,9 +1226,78 @@ void benmark512(){
 }
 
 
+void benmarkSortLarge(){
+    // Get amount of free global memory
+    size_t freeMem, totalMem;
+    CUDA_CHECK(cudaMemGetInfo(&freeMem, &totalMem));
+    std::cout << "Free memory: " << freeMem << std::endl;
+    std::cout << "Total memory: " << totalMem << std::endl;
+
+    const int nbElements = std::min(1UL << 29, (freeMem / sizeof(int)));
+    std::cout << "nbElements: " << nbElements << std::endl;
+
+    std::vector<int> h_array(nbElements);
+
+    for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
+        for(int idxSize = 512 ; idxSize <= nbElements ; idxSize *= 2){
+            for(int idxLoop = 0 ; idxLoop < 10 ; ++idxLoop){
+                {
+                    std::cout << "idxInitData: " << idxInitData << " idxSize: " << idxSize << " idxLoop: " << idxLoop << std::endl;
+
+
+                    if(idxInitData == RANDOM){
+                        std::random_device rd;
+                        std::mt19937 gen(0);
+                        std::uniform_int_distribution<int> dis(0, 1000000);
+                        for (int i = 0; i < int(h_array.size()); ++i) {
+                            h_array[i] = dis(gen);
+                        }
+                    }
+                    else if(idxInitData == SORTED){
+                        for (int i = 0; i < int(h_array.size()); ++i) {
+                            h_array[i] = i%32;
+                        }
+                    }
+                    else if(idxInitData == REVERSED){
+                        for (int i = 0; i < int(h_array.size()); ++i) {
+                            h_array[i] = 31-i%32;
+                        }
+                    }
+                    else{
+                        assert(0);
+                    }
+
+                    // Allocate device memory for the array
+                    int* d_array = nullptr;
+                    CUDA_CHECK(cudaMalloc(&d_array, h_array.size() * sizeof(int)));
+
+                    // Copy data from host to device
+                    CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), h_array.size() * sizeof(int), cudaMemcpyHostToDevice));
+
+                    CUDA_CHECK(cudaDeviceSynchronize());
+                    SpTimer timer;
+
+                    Sort<int, true, true, true>(d_array, idxSize);
+
+                    CUDA_CHECK(cudaDeviceSynchronize());
+                    timer.stop();
+
+                    std::cout << "Time: " << timer.getElapsed() << "s" << std::endl;
+
+                    // Free device memory
+                    CUDA_CHECK(cudaFree(d_array));
+                }
+            }
+        }
+    }
+}
+
+
+
 void benchmarkAll(){
     //benmark32();
-    benmark512();
+    //benmark512();
+    benmarkSortLarge();
 }
 
 ////////////////////////////////////////////////////////////////////
