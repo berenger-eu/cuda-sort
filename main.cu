@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cuda/pipeline>
 #include <cooperative_groups.h>
+#include <cooperative_groups/memcpy_async.h>
+#include <cuda/barrier>
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
@@ -368,38 +370,29 @@ __global__ void Sort_1Block_gt32_extsm(T* dataToSort, const int nbValuesToSort) 
     Sort_1Block_gt32_d_extsm<T, TestIfSorted, FullSM>(dataToSort, nbValuesToSort);
 }
 
-// Template CUDA kernel to sort an array
 template <typename T, bool TestIfSorted, bool FullSM>
 __device__ void Sort_1Block_async_gt32_d_extsm(T* dataToSort, const int nbValuesToSort) {
+    Sort_1Block_gt32_d_extsm<T, TestIfSorted, FullSM>(dataToSort, nbValuesToSort);// TODO !!!
+    return;
+
+    // Ensure valid sorting range
+    if (nbValuesToSort > blockDim.x) return;
+
     // Declare shared memory ptr
     extern __shared__ T shared_data[];
-    assert(nbValuesToSort <= blockDim.x);
 
     auto block = cooperative_groups::this_thread_block();
-    // Declare the barrier in shared memory.
-    __shared__ cuda::barrier<cuda::thread_scope_block> bar;
 
-    // Initialize the barrier using a friend function (or an appropriate initializer).
-    if (threadIdx.x == 0) {
-        init(&bar, block.size());
-    }
-    __syncthreads();
-
-    // Asynchronous copy from global to shared memory.
-    if (threadIdx.x == 0) {
-        cuda::memcpy_async(shared_data, dataToSort, sizeof(T)*nbValuesToSort, bar);
-    } else if (threadIdx.x >= nbValuesToSort) {
-        shared_data[threadIdx.x] = my_numeric_limits_max<T>();
-    }
-    bar.arrive_and_wait();
+    // Cooperative Async Copy
+    cooperative_groups::memcpy_async(block, shared_data, dataToSort, sizeof(T) * nbValuesToSort);
+    cooperative_groups::wait(block); // Ensure data is fully copied
 
     // Sort
     Core_Sort_1Block_SM_gt32_d<T, TestIfSorted, FullSM>(shared_data, nbValuesToSort);
+
     // Copy back
-    if(threadIdx.x == 0){
-        cuda::memcpy_async(dataToSort, shared_data, sizeof(T)*nbValuesToSort, bar);
-    }
-    bar.arrive_and_wait();
+    cooperative_groups::memcpy_async(block, dataToSort, shared_data, sizeof(T) * nbValuesToSort);
+    cooperative_groups::wait(block); // Ensure copy back is complete
 }
 
 
