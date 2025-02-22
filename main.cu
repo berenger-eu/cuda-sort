@@ -65,23 +65,27 @@ __device__ __forceinline__  constexpr T my_numeric_limits_min(){
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
 
+// This function check if the array given in parameter is sorted.
+// It works for one block of thread (so the test is performed for only the block)
+// There must be at least nbValuesToSort threads in the block
 template <typename T>
-__device__ __forceinline__ bool TestIfSorted_1Block(const T* dataToSort, const int nbValuesToSort){
-    __shared__ bool isSorted;
-    bool localIsSorted = true;
-    if(threadIdx.x == 0){
-        isSorted = true;
-    }
-    else if(threadIdx.x < nbValuesToSort){
-        if(dataToSort[threadIdx.x] < dataToSort[threadIdx.x-1]){
-            localIsSorted = false;
-        }        
+__device__ __forceinline__ bool TestIfSorted_1Block(const T* dataToSort, const int nbValuesToSort) {
+    assert(nbValuesToSort <= blockDim.x);
+
+    __shared__ volatile int isSorted;
+    if (threadIdx.x == 0) {
+        isSorted = 1;
     }
     __syncthreads();
-    if(!localIsSorted){
-        atomicExch((int*)&isSorted, 0);
+
+    if (threadIdx.x > 0 && threadIdx.x < nbValuesToSort) {
+        if (dataToSort[threadIdx.x] < dataToSort[threadIdx.x - 1]) {
+            atomicExch((int*)&isSorted, 0);
+        }
     }
+
     __syncthreads();
+
     return isSorted;
 }
 
