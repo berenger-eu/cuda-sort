@@ -409,7 +409,7 @@ __global__ void Sort_1Block_async_gt32_extsm(T* dataToSort, const int nbValuesTo
 
 template <typename T>
 __forceinline__ __device__ int binarySearch(const T pivots[], const int nbPivots, const T value) {
-    int start = 0, end = nbPivots; // Use actual size
+    int start = 0, end = nbPivots;
     while (start < end - 1) {
         int mid = (start + end) / 2;
         if (value < pivots[mid]) {
@@ -418,13 +418,14 @@ __forceinline__ __device__ int binarySearch(const T pivots[], const int nbPivots
             start = mid;
         }
     }
-    return start;  // `start` now gives the correct interval index
+    return start; 
 }
 
 
 template <typename T, int MaxParts>
 __device__ void CountParts_Grid_core(const T* data, const int size, const T* pivots, int* counters,
                                                    int* localCounters, const int nbParts){
+    assert(nbParts <= MaxParts);
     __shared__ T localPivots[MaxParts];
 
     if(threadIdx.x < nbParts){
@@ -456,11 +457,13 @@ __global__ void CountParts_Grid(const T* data, const int size, const T* pivots, 
     assert(blockDim.x >= nbParts);
 
     __shared__ int localCounters[MaxParts];
+
     CountParts_Grid_core<T, MaxParts>(data, size, pivots, counters, localCounters, nbParts);
 
     if(threadIdx.x < nbParts){
         atomicAdd(&counters[threadIdx.x], localCounters[threadIdx.x]);
     }
+    __syncthreads();
 }
 
 template <typename T, int MaxParts>
@@ -477,7 +480,6 @@ __global__ void MoveElements_Grid(T* data, const int size, const T* pivots, int*
     if(threadIdx.x < nbParts){
         localGOffset[threadIdx.x] = atomicAdd(&counters[threadIdx.x], localCounters[threadIdx.x]);
     }
-
     __syncthreads();
 
     const int id = threadIdx.x + blockIdx.x * blockDim.x;
@@ -531,7 +533,6 @@ __global__ void BuildPrefix_SM( NumType* prefixTree, const IndexType inSize){
     for(IndexType idx = threadIdx.x ; idx < inSize ; idx += blockDim.x){
         buffer[idx] = prefixTree[idx];
     }
-
     __syncthreads();
 
     BuildPrefix_SM_device(buffer, inSize);
@@ -539,6 +540,7 @@ __global__ void BuildPrefix_SM( NumType* prefixTree, const IndexType inSize){
     for(IndexType idx = threadIdx.x ; idx < inSize ; idx += blockDim.x){
         prefixTree[idx] = buffer[idx];
     }
+    __syncthreads();
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -560,21 +562,22 @@ __global__ void Sort_core_buildPivots(T* dataToSort, const int nbValuesToSort, T
     }
     if(threadIdx.x == 0){
         localPivots[0] = my_numeric_limits_min<T>();
-    }
-    
+    }    
     __syncthreads();
 
     if(nbParts <= 32){
         Core_Sort_1Warp_SM_le32_d<T, true>(localPivots, nbParts);
+        __syncthreads();
     }
     else{
         Core_Sort_1Block_SM_gt32_d<T, false, false>(localPivots, nbParts);
+        // There is a syncthread in the function
     }
 
-    __syncthreads();
     if(threadIdx.x < nbParts){
         pivots[threadIdx.x] = localPivots[threadIdx.x];
     }
+    __syncthreads();
 }
 
 template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito>
@@ -585,6 +588,7 @@ __global__ void SortPartitions(T* dataToSort, const int nbValuesToSort, const in
         const int size = end-start;
         if(size <= 32){
             Sort_1Warp_SM_le32_d<T, FullSM>(dataToSort+start, size);
+            __syncthreads();
         }
         else if(size <= blockDim.x){
             if constexpr(ASyncCpyBito){
