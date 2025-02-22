@@ -384,7 +384,6 @@ __device__ void Sort_1Block_async_gt32_d_extsm(T* dataToSort, const int nbValues
         init(&bar, block.size());
     }
     __syncthreads();
-    block.sync(); // Ensure all threads see the initialized barrier
 
     // Asynchronous copy from global to shared memory.
     if (threadIdx.x == 0) {
