@@ -605,11 +605,11 @@ __global__ void SortPartitions(T* dataToSort, const int nbValuesToSort, const in
 
 
 template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito, int MinNbParts = 32, int MaxNbParts = 64>
-__host__ void Sort(T* dataToSort, const int nbValuesToSort){
+__host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream = 0){
     static_assert(MaxNbParts <= DefaultNbThreadsPerBlock);
 
     if(nbValuesToSort <= 32){
-        Sort_1Warp_SM_le32<T, FullSM><<<1,32>>>(dataToSort, nbValuesToSort);
+        Sort_1Warp_SM_le32<T, FullSM><<<1,32,0,stream>>>(dataToSort, nbValuesToSort);
         return;
     }
 
@@ -618,10 +618,10 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort){
     const int NOrPow2 = GreaterPowerOf2EqualOrLarger(nbValuesToSort);
     if(NOrPow2 <= MaxThreadsPerBlock){
         if constexpr(ASyncCpyBito){
-            Sort_1Block_async_gt32_extsm<T, TestIfSorted, FullSM><<<1,NOrPow2,NOrPow2*sizeof(T)>>>(dataToSort, nbValuesToSort);
+            Sort_1Block_async_gt32_extsm<T, TestIfSorted, FullSM><<<1,NOrPow2,NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort);
         }
         else{
-            Sort_1Block_gt32_extsm<T, TestIfSorted, FullSM><<<1,NOrPow2,NOrPow2*sizeof(T)>>>(dataToSort, nbValuesToSort);
+            Sort_1Block_gt32_extsm<T, TestIfSorted, FullSM><<<1,NOrPow2,NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort);
         }
         return;
     }
@@ -630,53 +630,48 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort){
     const int NbPartsPow2 = GreaterPowerOf2EqualOrLarger(NbParts);
 
     int* dataBuffer = nullptr;
-    CUDA_CHECK(cudaMalloc(&dataBuffer, nbValuesToSort * sizeof(T)));
+    CUDA_CHECK(cudaMallocAsync(&dataBuffer, nbValuesToSort * sizeof(T), stream));
 
     int* pivots = nullptr;
-    CUDA_CHECK(cudaMalloc(&pivots, NbParts * sizeof(int)));
-    CUDA_CHECK(cudaMemset(pivots, 0, NbParts * sizeof(int)));
+    CUDA_CHECK(cudaMallocAsync(&pivots, NbParts * sizeof(int), stream));
+    CUDA_CHECK(cudaMemsetAsync(pivots, 0, NbParts * sizeof(int), stream));
 
-    Sort_core_buildPivots<T, MaxNbParts><<<1, NbPartsPow2 >>>(dataToSort, nbValuesToSort, pivots, NbParts);
+    Sort_core_buildPivots<T, MaxNbParts><<<1, NbPartsPow2, 0, stream>>>(dataToSort, nbValuesToSort, pivots, NbParts);
 
     int* counterParts = nullptr;
-    CUDA_CHECK(cudaMalloc(&counterParts, (NbParts+2) * sizeof(int)));
-    CUDA_CHECK(cudaMemset(counterParts, 0, (NbParts+2) * sizeof(int)));
+    CUDA_CHECK(cudaMallocAsync(&counterParts, (NbParts+2) * sizeof(int), stream));
+    CUDA_CHECK(cudaMemsetAsync(counterParts, 0, (NbParts+2) * sizeof(int), stream));
 
     const int nbThreadBlock = (nbValuesToSort+MaxThreadsPerBlock-1)/MaxThreadsPerBlock;
-    CountParts_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock >>>(dataToSort, nbValuesToSort, pivots, counterParts+2, NbParts);
+    CountParts_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock, 0, stream >>>(dataToSort, nbValuesToSort, pivots, counterParts+2, NbParts);
+
+    BuildPrefix_SM<T, int, MaxNbParts><<<1,NbParts,0,stream>>>(counterParts+2, NbParts);
 
 
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    BuildPrefix_SM<T, int, MaxNbParts><<<1,NbParts>>>(counterParts+2, NbParts);
-
-
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    MoveElements_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock >>>(dataToSort, nbValuesToSort,
+    MoveElements_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock,0,stream >>>(dataToSort, nbValuesToSort,
                                             pivots,
                                             counterParts+1,
                                             dataBuffer, NbParts);
 
-    // Wait for GPU to finish before accessing on host
-    CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaMemcpy(dataToSort, dataBuffer, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice));
-    CUDA_CHECK(cudaFree(dataBuffer));
-    CUDA_CHECK(cudaFree(pivots));
+    CUDA_CHECK(cudaMemcpyAsync(dataToSort, dataBuffer, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice, stream));
+    CUDA_CHECK(cudaFreeAsync(dataBuffer, stream));
+    CUDA_CHECK(cudaFreeAsync(pivots, stream));
 
-    SortPartitions<T, TestIfSorted, FullSM, ASyncCpyBito><<< NbParts, MaxThreadsPerBlock, MaxThreadsPerBlock*sizeof(T)>>>(dataToSort, nbValuesToSort, counterParts, NbParts);
+    SortPartitions<T, TestIfSorted, FullSM, ASyncCpyBito><<< NbParts, MaxThreadsPerBlock, MaxThreadsPerBlock*sizeof(T),stream>>>(dataToSort, nbValuesToSort, counterParts, NbParts);
 
-    CUDA_CHECK(cudaDeviceSynchronize());
     int counterPartsHost[NbParts+1];
-    CUDA_CHECK(cudaMemcpy(counterPartsHost, counterParts, (NbParts+1) * sizeof(int), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaFree(counterParts));    
+    CUDA_CHECK(cudaMemcpyAsync(counterPartsHost, counterParts, (NbParts+1) * sizeof(int), cudaMemcpyDeviceToHost, stream));
+
+    // We need counterPartsHost and that sortPartitions is over
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    CUDA_CHECK(cudaFreeAsync(counterParts, stream));    
     
     for(int idxPart = 0 ; idxPart < NbParts ; idxPart++){
         const int start = counterPartsHost[idxPart];
         const int end = counterPartsHost[idxPart+1];
         const int size = end-start;
         if(size > MaxThreadsPerBlock){
-            Sort<T, TestIfSorted, FullSM, ASyncCpyBito, MinNbParts, MaxNbParts>(dataToSort+start, size);
+            Sort<T, TestIfSorted, FullSM, ASyncCpyBito, MinNbParts, MaxNbParts>(dataToSort+start, size,stream);
         }
     }
 }
@@ -1447,7 +1442,7 @@ void benchmarkAll(){
 ////////////////////////////////////////////////////////////////////
 
 int main(){
-    //testall();
-    benchmarkAll();
+    testall();
+    //benchmarkAll();
     return 0;
 }
