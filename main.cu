@@ -1233,7 +1233,7 @@ void benmarkSortLarge(){
     std::cout << "Free memory: " << freeMem << std::endl;
     std::cout << "Total memory: " << totalMem << std::endl;
 
-    const int nbElements = std::min(1UL << 29, (freeMem / sizeof(int)));
+    const int nbElements = std::min(1UL << 31, (freeMem / sizeof(int)));
     std::cout << "nbElements: " << nbElements << std::endl;
 
 
@@ -1304,7 +1304,7 @@ void benmarkThrust(){
     std::cout << "Free memory: " << freeMem << std::endl;
     std::cout << "Total memory: " << totalMem << std::endl;
 
-    const int nbElements = std::min(1UL << 29, (freeMem / sizeof(int)));
+    const int nbElements = std::min(1UL << 31, (freeMem / sizeof(int)));
     std::cout << "nbElements: " << nbElements << std::endl;
 
     std::vector<int> h_array(nbElements);
@@ -1314,6 +1314,12 @@ void benmarkThrust(){
             for(int idxLoop = 0 ; idxLoop < 10 ; ++idxLoop){
                 {
                     std::cout << "idxInitData: " << idxInitData << " idxSize: " << idxSize << " idxLoop: " << idxLoop << std::endl;
+                    {
+                        size_t freeMem, totalMem;
+                        CUDA_CHECK(cudaMemGetInfo(&freeMem, &totalMem));
+                        std::cout << "Free memory: " << freeMem << std::endl;
+                        std::cout << "Total memory: " << totalMem << std::endl;
+                    }
 
 
                     if(idxInitData == RANDOM){
