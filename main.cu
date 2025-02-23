@@ -1005,12 +1005,27 @@ void testall() {
 ////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////
 
+#include <fstream>
+
 enum InitData{
     SORTED,
     REVERSED,
     RANDOM,
     NB_INITS
 };
+
+std::string InitDataString(int inInitData){
+    switch(inInitData){
+        case SORTED:
+            return "SORTED";
+        case REVERSED:
+            return "REVERSED";
+        case RANDOM:
+            return "RANDOM";
+        default:
+            return "UNKNOWN";
+    }
+}
 
 template <bool TBoo>
 struct ConstexprBool{
@@ -1029,7 +1044,15 @@ __global__ void benchmarkSortSmall(T* dataToSort, const int nbValuesToSort) {
 }
 
 
-void benmark32(){
+void benmark32(const std::string& inBasename){
+    std::ofstream filecsv(inBasename + "_32.csv");
+    if(!filecsv.is_open()){
+        std::cerr << "Cannot open file" << std::endl;
+        return;
+    }
+
+    filecsv << "#fullsm,datainit,size,fulltime,time" << std::endl;
+
     // Get amount of free global memory
     size_t freeMem, totalMem;
     CUDA_CHECK(cudaMemGetInfo(&freeMem, &totalMem));
@@ -1097,6 +1120,12 @@ void benmark32(){
 
                         // Free device memory
                         CUDA_CHECK(cudaFree(d_array));
+
+                        filecsv << (FullSM?"TRUE":"FALSE") << "," 
+                                << InitDataString(idxInitData) << "," 
+                                << idxSizePerWarp << "," 
+                                << timer.getElapsed() << ","
+                                << timer.getElapsed()/nbBlocks << std::endl;
                     }
                 }
             }
@@ -1115,7 +1144,15 @@ __global__ void benchmarkSort512(T* dataToSort, const int nbValuesToSort) {
     }
 }
 
-void benmark512(){
+void benmark512(const std::string& inBasename){
+    std::ofstream filecsv(inBasename + "_512.csv");
+    if(!filecsv.is_open()){
+        std::cerr << "Cannot open file" << std::endl;
+        return;
+    }
+
+    filecsv << "#testsorted,fullsm,asynccpy,datainit,size,fulltime,time" << std::endl;
+
     // Get amount of free global memory
     size_t freeMem, totalMem;
     CUDA_CHECK(cudaMemGetInfo(&freeMem, &totalMem));
@@ -1187,6 +1224,14 @@ void benmark512(){
 
                                 // Free device memory
                                 CUDA_CHECK(cudaFree(d_array));
+
+                                filecsv << (TestSorted?"TRUE":"FALSE") << "," 
+                                        << (FullSM?"TRUE":"FALSE") << "," 
+                                        << (AsynCpy?"TRUE":"FALSE") << "," 
+                                        << InitDataString(idxInitData) << "," 
+                                        << idxSizePerWarp << ","
+                                        <<  timer.getElapsed() << ","
+                                        << timer.getElapsed()/nbBlocks << std::endl;
                             }
                         }
                     }
@@ -1197,7 +1242,15 @@ void benmark512(){
 }
 
 
-void benmarkSortLarge(){
+void benmarkSortLarge(const std::string& inBasename){
+    std::ofstream filecsv(inBasename + "_large.csv");
+    if(!filecsv.is_open()){
+        std::cerr << "Cannot open file" << std::endl;
+        return;
+    }
+
+    filecsv << "#testsorted,fullsm,asynccpy,datainit,size,time,timelogn" << std::endl;
+
     // Get amount of free global memory
     size_t freeMem, totalMem;
     CUDA_CHECK(cudaMemGetInfo(&freeMem, &totalMem));
@@ -1262,6 +1315,15 @@ void benmarkSortLarge(){
 
                                 // Free device memory
                                 CUDA_CHECK(cudaFree(d_array));
+
+                                filecsv << (TestSorted?"TRUE":"FALSE") << "," 
+                                        << (FullSM?"TRUE":"FALSE") << "," 
+                                        << (AsynCpy?"TRUE":"FALSE") << "," 
+                                        << InitDataString(idxInitData) << "," 
+                                        << idxSize << "," 
+                                        << timer.getElapsed() << ","
+                                        << timer.getElapsed()/(idxSize * std::log2(idxSize))
+                                        << std::endl;
                             }
                         }
                     }
@@ -1276,7 +1338,15 @@ void benmarkSortLarge(){
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
 
-void benmarkThrust(){
+void benmarkThrust(const std::string& inBasename){
+    std::ofstream filecsv(inBasename + "_thrust.csv");
+    if(!filecsv.is_open()){
+        std::cerr << "Cannot open file" << std::endl;
+        return;
+    }
+
+    filecsv << "#datainit,size,time,timelogn" << std::endl;
+
     // Get amount of free global memory
     size_t freeMem, totalMem;
     CUDA_CHECK(cudaMemGetInfo(&freeMem, &totalMem));
@@ -1342,18 +1412,35 @@ void benmarkThrust(){
 
                     // Free device memory
                     CUDA_CHECK(cudaFree(d_array));
+
+                    filecsv << InitDataString(idxInitData) << "," 
+                            << idxSize << "," 
+                            << timer.getElapsed()  << ","
+                            << timer.getElapsed()/(idxSize * std::log2(idxSize))
+                            << std::endl;
                 }
             }
         }
     }
 }
 
+#include <ctime>
+
+std::string GetDateTime(){
+    time_t now = time(0);
+    struct tm tstruct;
+    char buf[80];
+    tstruct = *localtime(&now);
+    strftime(buf, sizeof(buf), "%Y-%m-%d-%X", &tstruct);
+    return buf;
+}
 
 void benchmarkAll(){
-    //benmark32();
-    //benmark512();
-    //benmarkSortLarge();
-    benmarkThrust();
+    const std::string filename = "benchmark_" + GetDateTime();
+    benmark32(filename);
+    benmark512(filename);
+    benmarkSortLarge(filename);
+    benmarkThrust(filename);
 }
 
 ////////////////////////////////////////////////////////////////////
