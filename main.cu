@@ -1275,7 +1275,7 @@ void benmarkSortLarge(const std::string& inBasename){
     std::cout << "Free memory: " << freeMem << std::endl;
     std::cout << "Total memory: " << totalMem << std::endl;
 
-    const int nbElements = std::min(1UL << 31, (freeMem / sizeof(int)));
+    const int nbElements = std::min(size_t(INT_MAX), (freeMem / sizeof(int) / 2));
     std::cout << "nbElements: " << nbElements << std::endl;
 
     for_bool([&](auto bool_constant_testsorted) {
@@ -1379,7 +1379,7 @@ void benmarkThrust(const std::string& inBasename){
     std::cout << "Free memory: " << freeMem << std::endl;
     std::cout << "Total memory: " << totalMem << std::endl;
 
-    const int nbElements = std::min(1UL << 31, (freeMem / sizeof(int)));
+    const int nbElements = std::min(size_t(INT_MAX), (freeMem / sizeof(int) / 2));
     std::cout << "nbElements: " << nbElements << std::endl;
 
     std::vector<int> h_array(nbElements);
