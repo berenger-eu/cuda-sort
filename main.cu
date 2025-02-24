@@ -1043,7 +1043,7 @@ void benmark32(const std::string& inBasename){
         return;
     }
 
-    filecsv << "#fullsm,datainit,size,fulltime,time" << std::endl;
+    filecsv << "#fullsm,datainit,size,fulltime,time,timelogn" << std::endl;
 
     // Get amount of free global memory
     size_t freeMem, totalMem;
@@ -1117,7 +1117,8 @@ void benmark32(const std::string& inBasename){
                                 << InitDataString(idxInitData) << "," 
                                 << idxSizePerWarp << "," 
                                 << timer.getElapsed() << ","
-                                << timer.getElapsed()/nbBlocks << std::endl;
+                                << timer.getElapsed()/nbBlocks << ","
+                                << timer.getElapsed()/nbBlocks/double(idxSizePerWarp*std::log2(idxSizePerWarp)) << std::endl;
                     }
                 }
             }
@@ -1143,7 +1144,7 @@ void benmark512(const std::string& inBasename){
         return;
     }
 
-    filecsv << "#testsorted,fullsm,asynccpy,datainit,size,fulltime,time" << std::endl;
+    filecsv << "#testsorted,fullsm,asynccpy,datainit,size,fulltime,time,timelogn" << std::endl;
 
     // Get amount of free global memory
     size_t freeMem, totalMem;
@@ -1223,7 +1224,8 @@ void benmark512(const std::string& inBasename){
                                         << InitDataString(idxInitData) << "," 
                                         << idxSizePerWarp << ","
                                         <<  timer.getElapsed() << ","
-                                        << timer.getElapsed()/nbBlocks << std::endl;
+                                        << timer.getElapsed()/nbBlocks << "," 
+                                        << timer.getElapsed()/nbBlocks/double(idxSizePerWarp*std::log2(idxSizePerWarp)) << std::endl;
                             }
                         }
                     }
