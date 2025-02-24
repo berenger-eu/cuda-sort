@@ -1003,6 +1003,7 @@ enum InitData{
     SORTED,
     REVERSED,
     RANDOM,
+    NORMAL,
     NB_INITS
 };
 
@@ -1014,6 +1015,8 @@ std::string InitDataString(int inInitData){
             return "REVERSED";
         case RANDOM:
             return "RANDOM";
+        case NORMAL:
+            return "NORMAL";
         default:
             return "UNKNOWN";
     }
@@ -1072,6 +1075,14 @@ void benmark32(const std::string& inBasename){
                             std::uniform_int_distribution<int> dis(0, 1000000);
                             for (int i = 0; i < int(h_array.size()); ++i) {
                                 h_array[i] = dis(gen);
+                            }
+                        }
+                        else if(idxInitData == NORMAL){
+                            std::random_device rd;
+                            std::mt19937 gen(0);
+                            std::normal_distribution<double> dis(0, 1 + idxSizePerWarp/4);
+                            for (int i = 0; i < int(h_array.size()); ++i) {
+                                h_array[i] = std::max(0, std::min( idxSizePerWarp,int(dis(gen)+idxSizePerWarp/2)));
                             }
                         }
                         else if(idxInitData == SORTED){
@@ -1178,14 +1189,22 @@ void benmark512(const std::string& inBasename){
                                         h_array[i] = dis(gen);
                                     }
                                 }
+                                else if(idxInitData == NORMAL){
+                                    std::random_device rd;
+                                    std::mt19937 gen(0);
+                                    std::normal_distribution<double> dis(0, 1 + idxSizePerWarp/4);
+                                    for (int i = 0; i < int(h_array.size()); ++i) {
+                                        h_array[i] = std::max(0, std::min( idxSizePerWarp,int(dis(gen)+idxSizePerWarp/2)));
+                                    }
+                                }
                                 else if(idxInitData == SORTED){
                                     for (int i = 0; i < int(h_array.size()); ++i) {
-                                        h_array[i] = i%32;
+                                        h_array[i] = i%idxSizePerWarp;
                                     }
                                 }
                                 else if(idxInitData == REVERSED){
                                     for (int i = 0; i < int(h_array.size()); ++i) {
-                                        h_array[i] = 31-i%32;
+                                        h_array[i] = (idxSizePerWarp-1)-i%idxSizePerWarp;
                                     }
                                 }
                                 else{
@@ -1276,14 +1295,22 @@ void benmarkSortLarge(const std::string& inBasename){
                                         h_array[i] = dis(gen);
                                     }
                                 }
+                                else if(idxInitData == NORMAL){
+                                    std::random_device rd;
+                                    std::mt19937 gen(0);
+                                    std::normal_distribution<double> dis(0, 1 + h_array.size()/4);
+                                    for (int i = 0; i < int(h_array.size()); ++i) {
+                                        h_array[i] = std::max(0UL, std::min( h_array.size(),size_t(dis(gen)+h_array.size()/2)));
+                                    }
+                                }
                                 else if(idxInitData == SORTED){
                                     for (int i = 0; i < int(h_array.size()); ++i) {
-                                        h_array[i] = i%32;
+                                        h_array[i] = i;
                                     }
                                 }
                                 else if(idxInitData == REVERSED){
                                     for (int i = 0; i < int(h_array.size()); ++i) {
-                                        h_array[i] = 31-i%32;
+                                        h_array[i] = h_array.size()-i;
                                     }
                                 }
                                 else{
@@ -1373,14 +1400,22 @@ void benmarkThrust(const std::string& inBasename){
                             h_array[i] = dis(gen);
                         }
                     }
+                    else if(idxInitData == NORMAL){
+                        std::random_device rd;
+                        std::mt19937 gen(0);
+                        std::normal_distribution<double> dis(0, 1 + h_array.size()/4);
+                        for (int i = 0; i < int(h_array.size()); ++i) {
+                            h_array[i] = std::max(0UL, std::min( h_array.size(),size_t(dis(gen)+h_array.size()/2)));
+                        }
+                    }
                     else if(idxInitData == SORTED){
                         for (int i = 0; i < int(h_array.size()); ++i) {
-                            h_array[i] = i%32;
+                            h_array[i] = i;
                         }
                     }
                     else if(idxInitData == REVERSED){
                         for (int i = 0; i < int(h_array.size()); ++i) {
-                            h_array[i] = 31-i%32;
+                            h_array[i] = h_array.size()-i;
                         }
                     }
                     else{
