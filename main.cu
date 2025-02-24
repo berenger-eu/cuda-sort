@@ -116,64 +116,63 @@ __device__ __forceinline__ void Core_Sort_1Warp_SM_le32_d(T* dataToSort, const i
     assert(32 <= blockDim.x);
 
     // Only the first 32 threads are used
-    if(32 <= threadIdx.x){
-        return;
-    }
-
-    unsigned laneId;
-    asm("mov.u32 %0, %%laneid;" : "=r"(laneId));
-    int vecincout = 0;
-    if constexpr (FullSM){
-        for(long int stepout = 1 ; stepout < 32 ; stepout *= 2){
-            {
-                const int ffttout = (threadIdx.x & stepout);
-                vecincout = vecincout + (ffttout? -stepout : stepout);
-                const int vecpermute = threadIdx.x + vecincout;
-                const T a = dataToSort[threadIdx.x];
-                const T b = dataToSort[vecpermute];
-                __syncwarp(0xffffffff);
-                const T best = (ffttout ? max(a, b) : min(a, b));
-                dataToSort[threadIdx.x] = best;
-                __syncwarp(0xffffffff);
-            }
-    
-            for(long int step = stepout/2 ; step >= 1 ; step/=2){
-                const int vecinc = step;
-                const int fftt = (threadIdx.x & step);
-                const int vecincout2 = (fftt? -vecinc  : vecinc);
-                const int vecpermute = (threadIdx.x + vecincout2);
-                const T a = dataToSort[threadIdx.x];
-                const T b = dataToSort[vecpermute];
-                __syncwarp(0xffffffff);
-                const T best = (fftt ? max(a, b) : min(a, b));
-                dataToSort[threadIdx.x] = best;
-                __syncwarp(0xffffffff);
+    if(threadIdx.x < 32){
+        unsigned laneId;
+        asm("mov.u32 %0, %%laneid;" : "=r"(laneId));
+        int vecincout = 0;
+        if constexpr (FullSM){
+            for(long int stepout = 1 ; stepout < 32 ; stepout *= 2){
+                {
+                    const int ffttout = (threadIdx.x & stepout);
+                    vecincout = vecincout + (ffttout? -stepout : stepout);
+                    const int vecpermute = threadIdx.x + vecincout;
+                    const T a = dataToSort[threadIdx.x];
+                    const T b = dataToSort[vecpermute];
+                    __syncwarp(0xffffffff);
+                    const T best = (ffttout ? max(a, b) : min(a, b));
+                    dataToSort[threadIdx.x] = best;
+                    __syncwarp(0xffffffff);
+                }
+        
+                for(long int step = stepout/2 ; step >= 1 ; step/=2){
+                    const int vecinc = step;
+                    const int fftt = (threadIdx.x & step);
+                    const int vecincout2 = (fftt? -vecinc  : vecinc);
+                    const int vecpermute = (threadIdx.x + vecincout2);
+                    const T a = dataToSort[threadIdx.x];
+                    const T b = dataToSort[vecpermute];
+                    __syncwarp(0xffffffff);
+                    const T best = (fftt ? max(a, b) : min(a, b));
+                    dataToSort[threadIdx.x] = best;
+                    __syncwarp(0xffffffff);
+                }
             }
         }
-    }
-    else{
-        const unsigned fullMask = 0xFFFFFFFF;
-        T a = dataToSort[threadIdx.x];
-        for(long int stepout = 1 ; stepout < 32 ; stepout *= 2){
-            {
-                const int ffttout = (threadIdx.x & stepout);
-                vecincout = vecincout + (ffttout? -stepout : stepout);
-                const int vecpermute = (vecincout+laneId);
-                const T b = __shfl_sync(fullMask, a, vecpermute);
-                a = (ffttout ? max(a, b) : min(a, b));
+        else{
+            const unsigned fullMask = 0xFFFFFFFF;
+            T a = dataToSort[threadIdx.x];
+            for(long int stepout = 1 ; stepout < 32 ; stepout *= 2){
+                {
+                    const int ffttout = (threadIdx.x & stepout);
+                    vecincout = vecincout + (ffttout? -stepout : stepout);
+                    const int vecpermute = (vecincout+laneId);
+                    const T b = __shfl_sync(fullMask, a, vecpermute);
+                    a = (ffttout ? max(a, b) : min(a, b));
+                }
+        
+                for(long int step = stepout/2 ; step >= 1 ; step/=2){
+                    const int vecinc = step;
+                    const int fftt = (threadIdx.x & step);
+                    const int vecincout2 = (fftt? -vecinc  : vecinc);
+                    const int vecpermute = (vecincout2+laneId);
+                    const T b = __shfl_sync(fullMask, a, vecpermute);
+                    a = (fftt ? max(a, b) : min(a, b));
+                }
             }
-    
-            for(long int step = stepout/2 ; step >= 1 ; step/=2){
-                const int vecinc = step;
-                const int fftt = (threadIdx.x & step);
-                const int vecincout2 = (fftt? -vecinc  : vecinc);
-                const int vecpermute = (vecincout2+laneId);
-                const T b = __shfl_sync(fullMask, a, vecpermute);
-                a = (fftt ? max(a, b) : min(a, b));
-            }
+            dataToSort[threadIdx.x] = a;
         }
-        dataToSort[threadIdx.x] = a;
     }
+    __syncthreads();
 }
 
 template <typename T, bool FullSM = true>
@@ -374,12 +373,6 @@ __global__ void Sort_1Block_gt32_extsm(T* dataToSort, const int nbValuesToSort) 
 
 template <typename T, bool TestIfSorted, bool FullSM>
 __device__ void Sort_1Block_async_gt32_d_extsm(T* dataToSort, const int nbValuesToSort) {
-    Sort_1Block_gt32_d_extsm<T, TestIfSorted, FullSM>(dataToSort, nbValuesToSort);// TODO !!!
-    return;
-
-    // Ensure valid sorting range
-    if (nbValuesToSort > blockDim.x) return;
-
     // Declare shared memory ptr
     extern __shared__ T shared_data[];
 
@@ -387,6 +380,10 @@ __device__ void Sort_1Block_async_gt32_d_extsm(T* dataToSort, const int nbValues
 
     // Cooperative Async Copy
     cooperative_groups::memcpy_async(block, shared_data, dataToSort, sizeof(T) * nbValuesToSort);
+    if(nbValuesToSort <= threadIdx.x){
+        shared_data[threadIdx.x] = my_numeric_limits_max<T>();
+    }
+
     cooperative_groups::wait(block); // Ensure data is fully copied
 
     // Sort
@@ -569,7 +566,7 @@ __global__ void Sort_core_buildPivots(T* dataToSort, const int nbValuesToSort, T
 
     if(nbParts <= 32){
         Core_Sort_1Warp_SM_le32_d<T, true>(localPivots, nbParts);
-        __syncthreads();
+        // There is a syncthread in the function
     }
     else{
         Core_Sort_1Block_SM_gt32_d<T, false, false>(localPivots, nbParts);
