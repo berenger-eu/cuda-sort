@@ -602,7 +602,7 @@ __global__ void SortPartitions(T* dataToSort, const int nbValuesToSort, const in
 
 
 template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito, int MinNbParts = 32, int MaxNbParts = 64>
-__host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream = 0){
+__host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream = 0, T* dataBuffer = nullptr){
     static_assert(MaxNbParts <= DefaultNbThreadsPerBlock);
 
     if(nbValuesToSort <= 32){
@@ -626,8 +626,10 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
     const int NbParts = std::min(MaxNbParts, std::max(MinNbParts, nbValuesToSort/MaxThreadsPerBlock));
     const int NbPartsPow2 = GreaterPowerOf2EqualOrLarger(NbParts);
 
-    int* dataBuffer = nullptr;
-    CUDA_CHECK(cudaMallocAsync(&dataBuffer, nbValuesToSort * sizeof(T), stream));
+    const bool allocatedDataBuffer = (dataBuffer == nullptr);
+    if(allocatedDataBuffer){
+        CUDA_CHECK(cudaMallocAsync(&dataBuffer, nbValuesToSort * sizeof(T), stream));
+    }
 
     int* pivots = nullptr;
     CUDA_CHECK(cudaMallocAsync(&pivots, NbParts * sizeof(int), stream));
@@ -651,7 +653,6 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
                                             dataBuffer, NbParts);
 
     CUDA_CHECK(cudaMemcpyAsync(dataToSort, dataBuffer, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice, stream));
-    CUDA_CHECK(cudaFreeAsync(dataBuffer, stream));
     CUDA_CHECK(cudaFreeAsync(pivots, stream));
 
     SortPartitions<T, TestIfSorted, FullSM, ASyncCpyBito><<< NbParts, MaxThreadsPerBlock, MaxThreadsPerBlock*sizeof(T),stream>>>(dataToSort, nbValuesToSort, counterParts, NbParts);
@@ -668,8 +669,12 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
         const int end = counterPartsHost[idxPart+1];
         const int size = end-start;
         if(size > MaxThreadsPerBlock){
-            Sort<T, TestIfSorted, FullSM, ASyncCpyBito, MinNbParts, MaxNbParts>(dataToSort+start, size,stream);
+            Sort<T, TestIfSorted, FullSM, ASyncCpyBito, MinNbParts, MaxNbParts>(dataToSort+start, size, stream, dataBuffer);
         }
+    }
+
+    if(allocatedDataBuffer){
+        CUDA_CHECK(cudaFreeAsync(dataBuffer, stream));
     }
 }
 
@@ -1476,7 +1481,7 @@ void benchmarkAll(){
 ////////////////////////////////////////////////////////////////////
 
 int main(){
-    testall();
-    //benchmarkAll();
+    //testall();
+    benchmarkAll();
     return 0;
 }
