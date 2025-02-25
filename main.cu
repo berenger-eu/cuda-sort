@@ -110,6 +110,29 @@ __device__ __forceinline__ bool TestIfSorted_1Block(const T* dataToSort, const i
     return isSorted;
 }
 
+template <typename T>
+__device__ __forceinline__ bool TestIfSorted_1Block_v3(const T* dataToSort, const int nbValuesToSort) {
+    __shared__ volatile int isSorted;
+    if (threadIdx.x == 0) {
+        isSorted = 1;
+    }
+    __syncthreads();
+
+    bool threadIsSorted = 1;
+    for(int idx = threadIdx.x + 1 ; idx < nbValuesToSort ; idx += blockDim.x){
+        if (dataToSort[idx] < dataToSort[idx - 1]) {
+            threadIsSorted = 0;
+        }
+    }
+    if(isSorted == 0){
+        atomicExch((int*)&isSorted, 0);
+    }
+
+    __syncthreads();
+
+    return isSorted;
+}
+
 // Get the min between two values
 template <typename T>
 __device__ __forceinline__ T min(const T& a, const T& b){
@@ -121,6 +144,16 @@ template <typename T>
 __device__ __forceinline__ T max(const T& a, const T& b){
     return a > b ? a : b;
 }
+
+template <typename T>
+__device__ __forceinline__ void swap(T& a, T& b){
+    T tmp = a;
+    a = b;
+    b = tmp;
+}
+
+///////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////
 
 // Sort 32 values or less. The values are sorted in place.
 // There might be more threads than 32.
@@ -435,6 +468,210 @@ template <typename T, bool TestIfSorted, bool FullSM>
 __global__ void Sort_1Block_async_gt32_extsm(T* dataToSort, const int nbValuesToSort) {
     Sort_1Block_async_gt32_d_extsm<T, TestIfSorted, FullSM>(dataToSort, nbValuesToSort);
 }
+
+////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////
+
+template <typename T, bool TestIfSorted, bool FullSM>
+__device__ __forceinline__ T* Core_Sort_1Block_SM_gt32_d_v2(T* dataToSort, const int nbValuesToSort,
+                                                            T* buffer){
+    if constexpr(FullSM == false){
+        assert(blockDim.x%32 == 0);
+    }
+
+    if constexpr (TestIfSorted){
+        if(TestIfSorted_1Block(dataToSort, nbValuesToSort)){
+            return dataToSort;
+        }
+    }
+
+    unsigned laneId;
+    asm("mov.u32 %0, %%laneid;" : "=r"(laneId));
+    const unsigned fullMask = 0xFFFFFFFF;
+    int vecincout = 0;
+    if constexpr (FullSM){
+        for(long int stepout = 1 ; stepout < 32 ; stepout *= 2){
+            {
+                const int ffttout = (threadIdx.x & stepout);
+                vecincout = vecincout + (ffttout? -stepout : stepout);
+                const int vecpermute = threadIdx.x + vecincout;
+                const T a = dataToSort[threadIdx.x];
+                const T b = dataToSort[vecpermute];
+                const T best = (ffttout ? max(a, b) : min(a, b));
+                buffer[threadIdx.x] = best;
+                swap(dataToSort, buffer);
+                __syncwarp(0xffffffff);
+            }
+    
+            for(long int step = stepout/2 ; step >= 1 ; step/=2){
+                const int vecinc = step;
+                const int fftt = (threadIdx.x & step);
+                const int vecincout2 = (fftt? -vecinc  : vecinc);
+                const int vecpermute = (threadIdx.x + vecincout2);
+                const T a = dataToSort[threadIdx.x];
+                const T b = dataToSort[vecpermute];
+                const T best = (fftt ? max(a, b) : min(a, b));
+                buffer[threadIdx.x] = best;
+                swap(dataToSort, buffer);
+                __syncwarp(0xffffffff);
+            }
+        }
+    }
+    else{
+        T a = dataToSort[threadIdx.x];
+        for(long int stepout = 1 ; stepout < 32 ; stepout *= 2){
+            {
+                const int ffttout = (threadIdx.x & stepout);
+                vecincout = vecincout + (ffttout? -stepout : stepout);
+                const int vecpermute = (vecincout+laneId);
+                const T b = __shfl_sync(fullMask, a, vecpermute);
+                a = (ffttout ? max(a, b) : min(a, b));
+            }
+    
+            for(long int step = stepout/2 ; step >= 1 ; step/=2){
+                const int vecinc = step;
+                const int fftt = (threadIdx.x & step);
+                const int vecincout2 = (fftt? -vecinc  : vecinc);
+                const int vecpermute = (vecincout2+laneId);
+                const T b = __shfl_sync(fullMask, a, vecpermute);
+                a = (fftt ? max(a, b) : min(a, b));
+            }
+        }
+        dataToSort[threadIdx.x] = a;
+    }
+    __syncthreads();
+
+    if constexpr (TestIfSorted){
+        if(TestIfSorted_1Block(dataToSort, nbValuesToSort)){
+            return dataToSort;
+        }
+    }
+
+    for(long int stepout = 32 ; stepout < nbValuesToSort ; stepout *= 2){
+        {
+            const int ffttout = (threadIdx.x & stepout);
+            vecincout = vecincout + (ffttout? -stepout : stepout);
+            const int vecpermute = threadIdx.x + vecincout;
+            const T a = dataToSort[threadIdx.x];
+            const T b = dataToSort[vecpermute];
+            const T best = (ffttout ? max(a, b) : min(a, b));
+            buffer[threadIdx.x] = best;
+            swap(dataToSort, buffer);
+            __syncthreads();
+        }
+
+        for(long int step = stepout/2 ; step >= 32 ; step/=2){
+            const int vecinc = step;
+            const int fftt = (threadIdx.x & step);
+            const int vecincout2 = (fftt? -vecinc  : vecinc);
+            const int vecpermute = (threadIdx.x + vecincout2);
+            const T a = dataToSort[threadIdx.x];
+            const T b = dataToSort[vecpermute];
+            const T best = (fftt ? max(a, b) : min(a, b));
+            buffer[threadIdx.x] = best;
+            swap(dataToSort, buffer);
+            __syncthreads();
+        }
+
+        if constexpr (FullSM){
+            for(long int step = 16 ; step >= 1 ; step/=2){
+                const int vecinc = step;
+                const int fftt = (threadIdx.x & step);
+                const int vecincout2 = (fftt? -vecinc  : vecinc);
+                const int vecpermute = (threadIdx.x + vecincout2);
+                const T a = dataToSort[threadIdx.x];
+                const T b = dataToSort[vecpermute];
+                const T best = (fftt ? max(a, b) : min(a, b));
+                buffer[threadIdx.x] = best;
+                swap(dataToSort, buffer);
+                __syncwarp(0xffffffff);
+            }
+        }
+        else{
+            T a = dataToSort[threadIdx.x];
+            for(long int step = 16 ; step >= 1 ; step/=2){
+                const int vecinc = step;
+                const int fftt = (threadIdx.x & step);
+                const int vecincout2 = (fftt? -vecinc  : vecinc);
+                const int vecpermute = (vecincout2+laneId);
+                const T b = __shfl_sync(fullMask, a, vecpermute);
+                a = (fftt ? max(a, b) : min(a, b));
+            }
+            dataToSort[threadIdx.x] = a;
+        }
+        __syncthreads();
+
+        if constexpr (TestIfSorted){
+            if(TestIfSorted_1Block(dataToSort, nbValuesToSort)){
+                return dataToSort;
+            }
+        }
+    }
+
+    return dataToSort;
+}
+
+
+// Template CUDA kernel to sort an array
+template <typename T, bool TestIfSorted, bool FullSM>
+__device__ void Sort_1Block_gt32_d_extsm_v2(T* dataToSort, const int nbValuesToSort) {
+    // Declare shared memory ptr
+    extern __shared__ T shared[];
+    assert(nbValuesToSort <= blockDim.x);
+    // Copy
+    if(threadIdx.x < nbValuesToSort){
+        shared[threadIdx.x] = dataToSort[threadIdx.x];
+    }
+    else{
+        shared[threadIdx.x] = my_numeric_limits_max<T>();
+    }
+    __syncthreads();
+    // Sort
+    T* buffer = shared + blockDim.x;
+    T* lastArray = Core_Sort_1Block_SM_gt32_d_v2<T, TestIfSorted, FullSM>(shared, nbValuesToSort, buffer);
+    // Copy back
+    if(threadIdx.x < nbValuesToSort){
+        dataToSort[threadIdx.x] = lastArray[threadIdx.x];
+    }
+    __syncthreads();
+}
+
+template <typename T, bool TestIfSorted, bool FullSM>
+__global__ void Sort_1Block_gt32_extsm_v2(T* dataToSort, const int nbValuesToSort) {
+    Sort_1Block_gt32_d_extsm_v2<T, TestIfSorted, FullSM>(dataToSort, nbValuesToSort);
+}
+
+template <typename T, bool TestIfSorted, bool FullSM>
+__device__ void Sort_1Block_async_gt32_d_extsm_v2(T* dataToSort, const int nbValuesToSort) {
+    // Declare shared memory ptr
+    extern __shared__ T shared_data[];
+
+    auto block = cooperative_groups::this_thread_block();
+
+    // Cooperative Async Copy
+    cooperative_groups::memcpy_async(block, shared_data, dataToSort, sizeof(T) * nbValuesToSort);
+    if(nbValuesToSort <= threadIdx.x){
+        shared_data[threadIdx.x] = my_numeric_limits_max<T>();
+    }
+
+    cooperative_groups::wait(block); // Ensure data is fully copied
+
+    // Sort
+    T* buffer = shared_data + blockDim.x;
+    T* lastArray = Core_Sort_1Block_SM_gt32_d_v2<T, TestIfSorted, FullSM>(shared_data, nbValuesToSort, buffer);
+
+    // Copy back
+    cooperative_groups::memcpy_async(block, dataToSort, lastArray, sizeof(T) * nbValuesToSort);
+    cooperative_groups::wait(block); // Ensure copy back is complete
+}
+
+
+// Template CUDA kernel to sort an array
+template <typename T, bool TestIfSorted, bool FullSM>
+__global__ void Sort_1Block_async_gt32_extsm_v2(T* dataToSort, const int nbValuesToSort) {
+    Sort_1Block_async_gt32_d_extsm_v2<T, TestIfSorted, FullSM>(dataToSort, nbValuesToSort);
+}
+
 
 
 ///////////////////////////////////////////////////////////////////////////
@@ -807,6 +1044,81 @@ void testSmall() {
         }
     }
 
+    for(int idxSize = 32 ; idxSize <= MaxSize ; idxSize *= 2){
+        for(const bool randValues : {false, true}){
+            // Number of elements to sort
+            const int N = idxSize;
+            assert(N <= MaxSharedMemSize / sizeof(int));
+            const int NOrPow2 = GreaterPowerOf2EqualOrLarger(N);
+            assert(((NOrPow2-1) & NOrPow2) == 0);
+            assert(NOrPow2 <= MaxSharedMemSize / sizeof(int));
+
+            std::cout << "Testing with " << N << " elements" << std::endl;
+            std::cout << " - Number of threads: " << NOrPow2 << std::endl;
+            std::cout << " - Shared memory size: " << NOrPow2 * sizeof(int) << std::endl;
+
+            std::vector<int> h_array(N);
+            if(randValues){
+                // Create a host vector and fill it with random values (using C++11 random)
+                std::random_device rd;
+                std::mt19937 gen(0);
+                std::uniform_int_distribution<int> dis(0, 10000);
+                for (int i = 0; i < N; ++i) {
+                    h_array[i] = dis(gen);
+                }
+            }
+            else{
+                for (int i = 0; i < N; ++i) {
+                    h_array[i] = N-i;
+                }
+            }
+
+            // Make a copy of the host array and sort it using std::sort for later verification.
+            std::vector<int> h_sorted = h_array;
+            std::sort(h_sorted.begin(), h_sorted.end());
+
+            // Allocate device memory for the array
+            int* d_array = nullptr;
+            CUDA_CHECK(cudaMalloc(&d_array, N * sizeof(int)));
+
+            // Copy data from host to device
+            CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), N * sizeof(int), cudaMemcpyHostToDevice));
+
+            // Define execution configuration (threads per block and blocks per grid)
+            const int threadsPerBlock = NOrPow2;
+            const int blocksPerGrid = 1;//(N + threadsPerBlock - 1) / threadsPerBlock;
+
+            // Launch the sort kernel (template instantiated for int)
+            const int sharedMemSize = 2 * NOrPow2 * sizeof(int);
+
+            if constexpr(ASyncCpyBito){
+                Sort_1Block_async_gt32_extsm_v2<int, TestIfSorted, FullSM><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_array, N);
+            }
+            else{
+                Sort_1Block_gt32_extsm_v2<int, TestIfSorted, FullSM><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_array, N);
+            }
+
+            // Wait for GPU to finish before accessing on host
+            CUDA_CHECK(cudaDeviceSynchronize());
+
+            // Copy the (supposedly sorted) array back from device to host
+            std::vector<int> h_result(N);
+            CUDA_CHECK(cudaMemcpy(h_result.data(), d_array, N * sizeof(int), cudaMemcpyDeviceToHost));
+
+            // Free device memory
+            CUDA_CHECK(cudaFree(d_array));
+
+            // Verify that the device result matches the sorted host array
+            if (h_result != h_sorted) {
+                for(int i = 0 ; i < N ; i++){
+                    std::cout << h_result[i] << " " << h_sorted[i] << std::endl;
+                }
+                std::cout << "The array is NOT correctly sorted." << std::endl;
+                assert(0);
+            }
+        }
+    }
+
 
     for(int idxSize = 32 ; idxSize <= MaxSize ; idxSize *= 3){
         for(const bool randValues : {false, true}){
@@ -860,6 +1172,81 @@ void testSmall() {
             }
             else{
                 Sort_1Block_gt32_extsm<int, TestIfSorted, FullSM><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_array, N);
+            }
+
+            // Wait for GPU to finish before accessing on host
+            CUDA_CHECK(cudaDeviceSynchronize());
+
+            // Copy the (supposedly sorted) array back from device to host
+            std::vector<int> h_result(N);
+            CUDA_CHECK(cudaMemcpy(h_result.data(), d_array, N * sizeof(int), cudaMemcpyDeviceToHost));
+
+            // Free device memory
+            CUDA_CHECK(cudaFree(d_array));
+
+            // Verify that the device result matches the sorted host array
+            if (h_result != h_sorted) {
+                for(int i = 0 ; i < N ; i++){
+                    std::cout << h_result[i] << " " << h_sorted[i] << std::endl;
+                }
+                std::cout << "The array is NOT correctly sorted." << std::endl;
+                assert(0);
+            }
+        }
+    }
+
+    for(int idxSize = 32 ; idxSize <= MaxSize ; idxSize *= 3){
+        for(const bool randValues : {false, true}){
+            // Number of elements to sort
+            const int N = idxSize;
+            assert(N <= MaxSharedMemSize / sizeof(int));
+            const int NOrPow2 = GreaterPowerOf2EqualOrLarger(N);
+            assert(((NOrPow2-1) & NOrPow2) == 0);
+            assert(NOrPow2 <= MaxSharedMemSize / sizeof(int));
+
+            std::cout << "Testing with " << N << " elements" << std::endl;
+            std::cout << " - Number of threads: " << NOrPow2 << std::endl;
+            std::cout << " - Shared memory size: " << NOrPow2 * sizeof(int) << std::endl;
+
+            std::vector<int> h_array(N);
+            if(randValues){
+                // Create a host vector and fill it with random values (using C++11 random)
+                std::random_device rd;
+                std::mt19937 gen(0);
+                std::uniform_int_distribution<int> dis(0, 10000);
+                for (int i = 0; i < N; ++i) {
+                    h_array[i] = dis(gen);
+                }
+            }
+            else{
+                for (int i = 0; i < N; ++i) {
+                    h_array[i] = N-i;
+                }
+            }
+
+            // Make a copy of the host array and sort it using std::sort for later verification.
+            std::vector<int> h_sorted = h_array;
+            std::sort(h_sorted.begin(), h_sorted.end());
+
+            // Allocate device memory for the array
+            int* d_array = nullptr;
+            CUDA_CHECK(cudaMalloc(&d_array, N * sizeof(int)));
+
+            // Copy data from host to device
+            CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), N * sizeof(int), cudaMemcpyHostToDevice));
+
+            // Define execution configuration (threads per block and blocks per grid)
+            const int threadsPerBlock = NOrPow2;
+            const int blocksPerGrid = 1;//(N + threadsPerBlock - 1) / threadsPerBlock;
+
+            // Launch the sort kernel (template instantiated for int)
+            const int sharedMemSize = 2 * NOrPow2 * sizeof(int);
+
+            if constexpr(ASyncCpyBito){
+                Sort_1Block_async_gt32_extsm_v2<int, TestIfSorted, FullSM><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_array, N);
+            }
+            else{
+                Sort_1Block_gt32_extsm_v2<int, TestIfSorted, FullSM><<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_array, N);
             }
 
             // Wait for GPU to finish before accessing on host
@@ -1299,6 +1686,124 @@ void benmark512(const std::string& inBasename){
 }
 
 
+template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito>
+__global__ void benchmarkSort512_v2(T* dataToSort, const int nbValuesToSort) {
+    if constexpr(ASyncCpyBito){
+        Sort_1Block_async_gt32_d_extsm_v2<T, TestIfSorted, FullSM>(dataToSort, nbValuesToSort);
+    }
+    else{
+        Sort_1Block_gt32_d_extsm_v2<T, TestIfSorted, FullSM>(dataToSort + blockIdx.x*nbValuesToSort, nbValuesToSort);
+    }
+}
+
+void benmark512_v2(const std::string& inBasename){
+    std::ofstream filecsv(inBasename + "_512_v2.csv");
+    if(!filecsv.is_open()){
+        std::cerr << "Cannot open file" << std::endl;
+        return;
+    }
+
+    filecsv << "#testsorted,fullsm,asynccpy,datainit,size,fulltime,time,timelogn" << std::endl;
+
+    // Get amount of free global memory
+    size_t freeMem, totalMem;
+    CUDA_CHECK(cudaMemGetInfo(&freeMem, &totalMem));
+    std::cout << "Free memory: " << freeMem << std::endl;
+    std::cout << "Total memory: " << totalMem << std::endl;
+
+    const int nbElements = std::min(1UL << 29, (freeMem / sizeof(int)));
+    std::cout << "nbElements: " << nbElements << std::endl;
+
+    const int nbBlocks = nbElements / DefaultNbThreadsPerBlock;
+    std::vector<int> h_array(nbElements);
+    for_bool([&](auto bool_constant_testsorted) {
+        constexpr bool TestSorted = bool_constant_testsorted.value;
+        for_bool([&](auto bool_constant_fullsm) {
+            constexpr bool FullSM = bool_constant_fullsm.value;
+            for_bool([&](auto bool_constant_asynccpy) {
+                constexpr bool AsynCpy = bool_constant_asynccpy.value;
+                for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
+                    for(int idxSizePerWarp = 32 ; idxSizePerWarp <= DefaultNbThreadsPerBlock ; idxSizePerWarp += 32){
+                        for(int idxLoop = 0 ; idxLoop < 10 ; ++idxLoop){
+                            {
+                                std::cout << "idxInitData: " << idxInitData << " idxSizePerWarp: " << idxSizePerWarp << " idxLoop: " << idxLoop << std::endl;
+
+
+                                if(idxInitData == RANDOM){
+                                    std::random_device rd;
+                                    std::mt19937 gen(0);
+                                    std::uniform_int_distribution<int> dis(0, 1000000);
+                                    for (int i = 0; i < int(h_array.size()); ++i) {
+                                        h_array[i] = dis(gen);
+                                    }
+                                }
+                                else if(idxInitData == NORMAL){
+                                    std::random_device rd;
+                                    std::mt19937 gen(0);
+                                    std::normal_distribution<double> dis(0, 1 + idxSizePerWarp/4);
+                                    for (int i = 0; i < int(h_array.size()); ++i) {
+                                        h_array[i] = std::max(0, std::min( idxSizePerWarp,int(dis(gen)+idxSizePerWarp/2)));
+                                    }
+                                }
+                                else if(idxInitData == SORTED){
+                                    for (int i = 0; i < int(h_array.size()); ++i) {
+                                        h_array[i] = i%idxSizePerWarp;
+                                    }
+                                }
+                                else if(idxInitData == REVERSED){
+                                    for (int i = 0; i < int(h_array.size()); ++i) {
+                                        h_array[i] = (idxSizePerWarp-1)-i%idxSizePerWarp;
+                                    }
+                                }
+                                else{
+                                    assert(0);
+                                }
+
+                                // Allocate device memory for the array
+                                int* d_array = nullptr;
+                                CUDA_CHECK(cudaMalloc(&d_array, h_array.size() * sizeof(int)));
+
+                                // Copy data from host to device
+                                CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), h_array.size() * sizeof(int), cudaMemcpyHostToDevice));
+
+                                // Define execution configuration (threads per block and blocks per grid)
+                                const int NOrPow2 = GreaterPowerOf2EqualOrLarger(idxSizePerWarp);
+                                const int threadsPerBlock = NOrPow2;
+                                const int blocksPerGrid = nbBlocks;
+
+                                CUDA_CHECK(cudaDeviceSynchronize());
+                                SpTimer timer;
+
+                                benchmarkSort512_v2<int, TestSorted, FullSM, AsynCpy><<<blocksPerGrid, threadsPerBlock, 2*NOrPow2*sizeof(int) >>>(d_array, idxSizePerWarp);
+
+                                CUDA_CHECK(cudaDeviceSynchronize());
+                                timer.stop();
+
+                                std::cout << "Time: " << timer.getElapsed() << "s" << std::endl;
+                                std::cout << "    - by sort : " << timer.getElapsed()/nbBlocks << "s" << std::endl;
+
+                                // Free device memory
+                                CUDA_CHECK(cudaFree(d_array));
+
+                                filecsv << (TestSorted?"TRUE":"FALSE") << "," 
+                                        << (FullSM?"TRUE":"FALSE") << "," 
+                                        << (AsynCpy?"TRUE":"FALSE") << "," 
+                                        << InitDataString(idxInitData) << "," 
+                                        << idxSizePerWarp << ","
+                                        <<  timer.getElapsed() << ","
+                                        << timer.getElapsed()/nbBlocks << "," 
+                                        << timer.getElapsed()/nbBlocks/double(idxSizePerWarp*std::log2(idxSizePerWarp)) << std::endl;
+                            }
+                        }
+                    }
+                }
+            });
+        });
+    });
+}
+
+
+
 void benmarkSortLarge(const std::string& inBasename){
     std::ofstream filecsv(inBasename + "_large.csv");
     if(!filecsv.is_open()){
@@ -1512,6 +2017,7 @@ void benchmarkAll(){
     const std::string filename = "benchmark_" + GetDateTime();
     benmark32(filename);
     benmark512(filename);
+    benmark512_v2(filename);
     benmarkSortLarge(filename);
     benmarkThrust(filename);
 }
