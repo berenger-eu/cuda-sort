@@ -69,6 +69,23 @@ __device__ __forceinline__  constexpr T my_numeric_limits_min(){
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
 
+template <typename T>
+__device__ __forceinline__ bool TestIfSorted_1Warp(const T& dataToSort) {
+    // Get the active thread mask and the current lane ID.
+    unsigned int mask = __activemask();
+    int lane = threadIdx.x & 31;  // assuming warp size is 32
+
+    // Each thread (except lane 0) compares its value with its left neighbor.
+    bool isSorted = true;
+    T prev = __shfl_up_sync(mask, dataToSort, 1);
+    if (lane > 0) {
+        isSorted = (prev <= dataToSort);
+    }
+    // Propagate the result to all threads in the warp.
+    return __all_sync(mask, isSorted);
+}
+
+
 // This function check if the array given in parameter is sorted.
 // It works for one block of thread (so the tests are performed for only the block)
 // There must be at least nbValuesToSort threads in the block
@@ -110,10 +127,16 @@ __device__ __forceinline__ T max(const T& a, const T& b){
 // If FullSM is used, the shared memory is used to store the values while sorting.
 // Otherwise the values are sorted using warp shuffle.
 // 32 threads are used, the others are return immediately without syncthreads.
-template <typename T, bool FullSM = true>
+template <typename T, bool TestIfSorted, bool FullSM>
 __device__ __forceinline__ void Core_Sort_1Warp_SM_le32_d(T* dataToSort, const int nbValuesToSort){
     assert(nbValuesToSort <= 32);
     assert(32 <= blockDim.x);
+
+    if constexpr (TestIfSorted){
+        if(TestIfSorted_1Warp(dataToSort[threadIdx.x])){
+            return;
+        }
+    }
 
     // Only the first 32 threads are used
     if(threadIdx.x < 32){
@@ -146,6 +169,12 @@ __device__ __forceinline__ void Core_Sort_1Warp_SM_le32_d(T* dataToSort, const i
                     dataToSort[threadIdx.x] = best;
                     __syncwarp(0xffffffff);
                 }
+
+                if constexpr (TestIfSorted){
+                    if(TestIfSorted_1Warp(dataToSort[threadIdx.x])){
+                        break;
+                    }
+                }
             }
         }
         else{
@@ -168,6 +197,12 @@ __device__ __forceinline__ void Core_Sort_1Warp_SM_le32_d(T* dataToSort, const i
                     const T b = __shfl_sync(fullMask, a, vecpermute);
                     a = (fftt ? max(a, b) : min(a, b));
                 }
+
+                if constexpr (TestIfSorted){
+                    if(TestIfSorted_1Warp(a)){
+                        break;
+                    }
+                }
             }
             dataToSort[threadIdx.x] = a;
         }
@@ -175,7 +210,7 @@ __device__ __forceinline__ void Core_Sort_1Warp_SM_le32_d(T* dataToSort, const i
     __syncthreads();
 }
 
-template <typename T, bool FullSM = true>
+template <typename T, bool TestIfSorted, bool FullSM>
 __device__ void Sort_1Warp_SM_le32_d(T* dataToSort, const int nbValuesToSort){
     assert(nbValuesToSort <= 32);
     __shared__ T shared[32];
@@ -188,7 +223,7 @@ __device__ void Sort_1Warp_SM_le32_d(T* dataToSort, const int nbValuesToSort){
     }
     // We do not sync because only the first 32 threads will be used
     // Sort
-    Core_Sort_1Warp_SM_le32_d<T, FullSM>(shared, nbValuesToSort);
+    Core_Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(shared, nbValuesToSort);
     // Copy back
     if(threadIdx.x < nbValuesToSort){
         dataToSort[threadIdx.x] = shared[threadIdx.x];
@@ -197,15 +232,15 @@ __device__ void Sort_1Warp_SM_le32_d(T* dataToSort, const int nbValuesToSort){
     __syncthreads();
 }
 
-template <typename T, bool FullSM = true>
+template <typename T, bool TestIfSorted, bool FullSM>
 __global__ void Sort_1Warp_SM_le32(T* dataToSort, const int nbValuesToSort){
-    Sort_1Warp_SM_le32_d(dataToSort, nbValuesToSort);
+    Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(dataToSort, nbValuesToSort);
 }
 
 // Sort at least 32 vales inplace.
 // The number of threads must be multiple of 32 if FullSM is false and warp shuffle is used.
 // Otherwise the number of threads can be any value.
-template <typename T, bool TestIfSorted = false, bool FullSM = true>
+template <typename T, bool TestIfSorted, bool FullSM>
 __device__ __forceinline__ void Core_Sort_1Block_SM_gt32_d(T* dataToSort, const int nbValuesToSort){
     assert(nbValuesToSort <= blockDim.x);
     if constexpr(FullSM == false){
@@ -565,7 +600,7 @@ __global__ void Sort_core_buildPivots(T* dataToSort, const int nbValuesToSort, T
     __syncthreads();
 
     if(nbParts <= 32){
-        Core_Sort_1Warp_SM_le32_d<T, true>(localPivots, nbParts);
+        Core_Sort_1Warp_SM_le32_d<T, false, false>(localPivots, nbParts);
         // There is a syncthread in the function
     }
     else{
@@ -586,7 +621,7 @@ __global__ void SortPartitions(T* dataToSort, const int nbValuesToSort, const in
         const int end = counterParts[idxPart+1];
         const int size = end-start;
         if(size <= 32){
-            Sort_1Warp_SM_le32_d<T, FullSM>(dataToSort+start, size);
+            Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(dataToSort+start, size);
             __syncthreads();
         }
         else if(size <= blockDim.x){
@@ -606,7 +641,7 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
     static_assert(MaxNbParts <= DefaultNbThreadsPerBlock);
 
     if(nbValuesToSort <= 32){
-        Sort_1Warp_SM_le32<T, FullSM><<<1,32,0,stream>>>(dataToSort, nbValuesToSort);
+        Sort_1Warp_SM_le32<T, TestIfSorted, FullSM><<<1,32,0,stream>>>(dataToSort, nbValuesToSort);
         return;
     }
 
@@ -883,7 +918,7 @@ void testSmall() {
             // Copy data from host to device
             CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), N * sizeof(int), cudaMemcpyHostToDevice));
 
-            Sort_1Warp_SM_le32<int, FullSM><<<1,32>>>(d_array, N);
+            Sort_1Warp_SM_le32<int, TestIfSorted, FullSM><<<1,32>>>(d_array, N);
 
             // Wait for GPU to finish before accessing on host
             CUDA_CHECK(cudaDeviceSynchronize());
@@ -1038,9 +1073,9 @@ constexpr void for_bool(Func&& func) {
     func(ConstexprBool<false>());
 }
 
-template <typename T, bool FullSM>
+template <typename T, bool TestIfSorted, bool FullSM>
 __global__ void benchmarkSortSmall(T* dataToSort, const int nbValuesToSort) {
-    Sort_1Warp_SM_le32_d<T, FullSM>(dataToSort + blockIdx.x*32, nbValuesToSort);
+    Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(dataToSort + blockIdx.x*32, nbValuesToSort);
 }
 
 
@@ -1051,7 +1086,7 @@ void benmark32(const std::string& inBasename){
         return;
     }
 
-    filecsv << "#fullsm,datainit,size,fulltime,time,timelogn" << std::endl;
+    filecsv << "#testsorted,fullsm,datainit,size,fulltime,time,timelogn" << std::endl;
 
     // Get amount of free global memory
     size_t freeMem, totalMem;
@@ -1065,80 +1100,84 @@ void benmark32(const std::string& inBasename){
     const int nbBlocks = nbElements / 32;
     std::vector<int> h_array(nbElements);
 
-    for_bool([&](auto bool_constant_fullsm) {
-        constexpr bool FullSM = bool_constant_fullsm.value;
-        for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
-            for(int idxSizePerWarp = 1 ; idxSizePerWarp <= 32 ; ++idxSizePerWarp){
-                for(int idxLoop = 0 ; idxLoop < 10 ; ++idxLoop){
-                    {
-                        std::cout << "idxInitData: " << idxInitData << " idxSizePerWarp: " << idxSizePerWarp << " idxLoop: " << idxLoop << std::endl;
+    for_bool([&](auto bool_constant_testsorted) {
+        constexpr bool TestSorted = bool_constant_testsorted.value;
+        for_bool([&](auto bool_constant_fullsm) {
+            constexpr bool FullSM = bool_constant_fullsm.value;
+            for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
+                for(int idxSizePerWarp = 1 ; idxSizePerWarp <= 32 ; ++idxSizePerWarp){
+                    for(int idxLoop = 0 ; idxLoop < 10 ; ++idxLoop){
+                        {
+                            std::cout << "idxInitData: " << idxInitData << " idxSizePerWarp: " << idxSizePerWarp << " idxLoop: " << idxLoop << std::endl;
 
 
-                        if(idxInitData == RANDOM){
-                            std::random_device rd;
-                            std::mt19937 gen(0);
-                            std::uniform_int_distribution<int> dis(0, 1000000);
-                            for (int i = 0; i < int(h_array.size()); ++i) {
-                                h_array[i] = dis(gen);
+                            if(idxInitData == RANDOM){
+                                std::random_device rd;
+                                std::mt19937 gen(0);
+                                std::uniform_int_distribution<int> dis(0, 1000000);
+                                for (int i = 0; i < int(h_array.size()); ++i) {
+                                    h_array[i] = dis(gen);
+                                }
                             }
-                        }
-                        else if(idxInitData == NORMAL){
-                            std::random_device rd;
-                            std::mt19937 gen(0);
-                            std::normal_distribution<double> dis(0, 1 + idxSizePerWarp/4);
-                            for (int i = 0; i < int(h_array.size()); ++i) {
-                                h_array[i] = std::max(0, std::min( idxSizePerWarp,int(dis(gen)+idxSizePerWarp/2)));
+                            else if(idxInitData == NORMAL){
+                                std::random_device rd;
+                                std::mt19937 gen(0);
+                                std::normal_distribution<double> dis(0, 1 + idxSizePerWarp/4);
+                                for (int i = 0; i < int(h_array.size()); ++i) {
+                                    h_array[i] = std::max(0, std::min( idxSizePerWarp,int(dis(gen)+idxSizePerWarp/2)));
+                                }
                             }
-                        }
-                        else if(idxInitData == SORTED){
-                            for (int i = 0; i < int(h_array.size()); ++i) {
-                                h_array[i] = i%32;
+                            else if(idxInitData == SORTED){
+                                for (int i = 0; i < int(h_array.size()); ++i) {
+                                    h_array[i] = i%32;
+                                }
                             }
-                        }
-                        else if(idxInitData == REVERSED){
-                            for (int i = 0; i < int(h_array.size()); ++i) {
-                                h_array[i] = 31-i%32;
+                            else if(idxInitData == REVERSED){
+                                for (int i = 0; i < int(h_array.size()); ++i) {
+                                    h_array[i] = 31-i%32;
+                                }
                             }
+                            else{
+                                assert(0);
+                            }
+
+                            // Allocate device memory for the array
+                            int* d_array = nullptr;
+                            CUDA_CHECK(cudaMalloc(&d_array, h_array.size() * sizeof(int)));
+
+                            // Copy data from host to device
+                            CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), h_array.size() * sizeof(int), cudaMemcpyHostToDevice));
+
+                            // Define execution configuration (threads per block and blocks per grid)
+                            const int threadsPerBlock = 32;
+                            const int blocksPerGrid = nbBlocks;
+
+                            CUDA_CHECK(cudaDeviceSynchronize());
+                            SpTimer timer;
+
+                            benchmarkSortSmall<int, TestSorted, FullSM><<<blocksPerGrid, threadsPerBlock>>>(d_array, idxSizePerWarp);
+
+                            CUDA_CHECK(cudaDeviceSynchronize());
+                            timer.stop();
+
+                            std::cout << "Time: " << timer.getElapsed() << "s" << std::endl;
+                            std::cout << "    - by sort : " << timer.getElapsed()/nbBlocks << "s" << std::endl;
+
+                            // Free device memory
+                            CUDA_CHECK(cudaFree(d_array));
+
+                            filecsv << (TestSorted ? "TRUE":"FALSE") << ","
+                                    << (FullSM?"TRUE":"FALSE") << "," 
+                                    << InitDataString(idxInitData) << "," 
+                                    << idxSizePerWarp << "," 
+                                    << timer.getElapsed() << ","
+                                    << timer.getElapsed()/nbBlocks << ","
+                                    << timer.getElapsed()/nbBlocks/double(idxSizePerWarp*std::log2(idxSizePerWarp)) << std::endl;
                         }
-                        else{
-                            assert(0);
-                        }
-
-                        // Allocate device memory for the array
-                        int* d_array = nullptr;
-                        CUDA_CHECK(cudaMalloc(&d_array, h_array.size() * sizeof(int)));
-
-                        // Copy data from host to device
-                        CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), h_array.size() * sizeof(int), cudaMemcpyHostToDevice));
-
-                        // Define execution configuration (threads per block and blocks per grid)
-                        const int threadsPerBlock = 32;
-                        const int blocksPerGrid = nbBlocks;
-
-                        CUDA_CHECK(cudaDeviceSynchronize());
-                        SpTimer timer;
-
-                        benchmarkSortSmall<int, FullSM><<<blocksPerGrid, threadsPerBlock>>>(d_array, idxSizePerWarp);
-
-                        CUDA_CHECK(cudaDeviceSynchronize());
-                        timer.stop();
-
-                        std::cout << "Time: " << timer.getElapsed() << "s" << std::endl;
-                        std::cout << "    - by sort : " << timer.getElapsed()/nbBlocks << "s" << std::endl;
-
-                        // Free device memory
-                        CUDA_CHECK(cudaFree(d_array));
-
-                        filecsv << (FullSM?"TRUE":"FALSE") << "," 
-                                << InitDataString(idxInitData) << "," 
-                                << idxSizePerWarp << "," 
-                                << timer.getElapsed() << ","
-                                << timer.getElapsed()/nbBlocks << ","
-                                << timer.getElapsed()/nbBlocks/double(idxSizePerWarp*std::log2(idxSizePerWarp)) << std::endl;
                     }
                 }
             }
-        }
+        });
     });
 }
 
