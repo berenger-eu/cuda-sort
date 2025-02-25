@@ -410,7 +410,7 @@ template <typename T>
 __forceinline__ __device__ int binarySearch(const T pivots[], const int nbPivots, const T value) {
     int start = 0, end = nbPivots;
     while (start < end - 1) {
-        int mid = (start + end) / 2;
+        int mid = start + (end - start) / 2;
         if (value < pivots[mid]) {
             end = mid;
         } else {
@@ -1275,7 +1275,7 @@ void benmarkSortLarge(const std::string& inBasename){
     std::cout << "Free memory: " << freeMem << std::endl;
     std::cout << "Total memory: " << totalMem << std::endl;
 
-    const int nbElements = std::min(size_t(INT_MAX), (freeMem / sizeof(int) / 2));
+    const int nbElements = std::min(1073741824UL, (freeMem / sizeof(int) / 2));
     std::cout << "nbElements: " << nbElements << std::endl;
 
     for_bool([&](auto bool_constant_testsorted) {
@@ -1379,7 +1379,7 @@ void benmarkThrust(const std::string& inBasename){
     std::cout << "Free memory: " << freeMem << std::endl;
     std::cout << "Total memory: " << totalMem << std::endl;
 
-    const int nbElements = std::min(size_t(INT_MAX), (freeMem / sizeof(int) / 2));
+    const int nbElements = std::min(1073741824UL, (freeMem / sizeof(int) / 2));
     std::cout << "nbElements: " << nbElements << std::endl;
 
     std::vector<int> h_array(nbElements);
