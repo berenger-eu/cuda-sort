@@ -185,10 +185,12 @@ void benmark512(const std::string& inBasename){
             for_bool([&](auto bool_constant_asynccpy) {
                 constexpr bool AsynCpy = bool_constant_asynccpy.value;
                 for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
-                    for(int idxSizePerWarp = 32 ; idxSizePerWarp <= DefaultNbThreadsPerBlock ; idxSizePerWarp += 32){
+                    for(int idxSizePerBlock = 32 ; idxSizePerBlock <= DefaultNbThreadsPerBlock ; idxSizePerBlock += 32){
                         for(int idxLoop = 0 ; idxLoop < 10 ; ++idxLoop){
                             {
-                                std::cout << "idxInitData: " << idxInitData << " idxSizePerWarp: " << idxSizePerWarp << " idxLoop: " << idxLoop << std::endl;
+                                std::cout << "idxInitData: " << idxInitData 
+                                            << " idxSizePerBlock: " << idxSizePerBlock 
+                                            << " idxLoop: " << idxLoop << std::endl;
 
 
                                 if(idxInitData == RANDOM){
@@ -202,19 +204,19 @@ void benmark512(const std::string& inBasename){
                                 else if(idxInitData == NORMAL){
                                     std::random_device rd;
                                     std::mt19937 gen(0);
-                                    std::normal_distribution<double> dis(0, 1 + idxSizePerWarp/4);
+                                    std::normal_distribution<double> dis(0, 1 + idxSizePerBlock/4);
                                     for (int i = 0; i < int(h_array.size()); ++i) {
-                                        h_array[i] = std::max(0, std::min( idxSizePerWarp,int(dis(gen)+idxSizePerWarp/2)));
+                                        h_array[i] = std::max(0, std::min( idxSizePerBlock,int(dis(gen)+idxSizePerBlock/2)));
                                     }
                                 }
                                 else if(idxInitData == SORTED){
                                     for (int i = 0; i < int(h_array.size()); ++i) {
-                                        h_array[i] = i%idxSizePerWarp;
+                                        h_array[i] = i%idxSizePerBlock;
                                     }
                                 }
                                 else if(idxInitData == REVERSED){
                                     for (int i = 0; i < int(h_array.size()); ++i) {
-                                        h_array[i] = (idxSizePerWarp-1)-i%idxSizePerWarp;
+                                        h_array[i] = (idxSizePerBlock-1)-i%idxSizePerBlock;
                                     }
                                 }
                                 else{
@@ -229,14 +231,14 @@ void benmark512(const std::string& inBasename){
                                 CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), h_array.size() * sizeof(int), cudaMemcpyHostToDevice));
 
                                 // Define execution configuration (threads per block and blocks per grid)
-                                const int NOrPow2 = GreaterPowerOf2EqualOrLarger(idxSizePerWarp);
+                                const int NOrPow2 = GreaterPowerOf2EqualOrLarger(idxSizePerBlock);
                                 const int threadsPerBlock = NOrPow2;
                                 const int blocksPerGrid = nbBlocks;
 
                                 CUDA_CHECK(cudaDeviceSynchronize());
                                 SpTimer timer;
 
-                                benchmarkSort512<int, TestSorted, FullSM, AsynCpy><<<blocksPerGrid, threadsPerBlock, NOrPow2*sizeof(int) >>>(d_array, idxSizePerWarp);
+                                benchmarkSort512<int, TestSorted, FullSM, AsynCpy><<<blocksPerGrid, threadsPerBlock, NOrPow2*sizeof(int) >>>(d_array, idxSizePerBlock);
 
                                 CUDA_CHECK(cudaDeviceSynchronize());
                                 timer.stop();
@@ -251,10 +253,10 @@ void benmark512(const std::string& inBasename){
                                         << (FullSM?"TRUE":"FALSE") << "," 
                                         << (AsynCpy?"TRUE":"FALSE") << "," 
                                         << InitDataString(idxInitData) << "," 
-                                        << idxSizePerWarp << ","
+                                        << idxSizePerBlock << ","
                                         <<  timer.getElapsed() << ","
                                         << timer.getElapsed()/nbBlocks << "," 
-                                        << timer.getElapsed()/nbBlocks/double(idxSizePerWarp*std::log2(idxSizePerWarp)) << std::endl;
+                                        << timer.getElapsed()/nbBlocks/double(idxSizePerBlock*std::log2(idxSizePerBlock)) << std::endl;
                             }
                         }
                     }
@@ -302,10 +304,11 @@ void benmark512_v2(const std::string& inBasename){
             for_bool([&](auto bool_constant_asynccpy) {
                 constexpr bool AsynCpy = bool_constant_asynccpy.value;
                 for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
-                    for(int idxSizePerWarp = 32 ; idxSizePerWarp <= DefaultNbThreadsPerBlock ; idxSizePerWarp += 32){
+                    for(int idxSizePerBlock = 32 ; idxSizePerBlock <= DefaultNbThreadsPerBlock ; idxSizePerBlock += 32){
                         for(int idxLoop = 0 ; idxLoop < 10 ; ++idxLoop){
                             {
-                                std::cout << "idxInitData: " << idxInitData << " idxSizePerWarp: " << idxSizePerWarp << " idxLoop: " << idxLoop << std::endl;
+                                std::cout << "idxInitData: " << idxInitData 
+                                            << " idxSizePerBlock: " << idxSizePerBlock << " idxLoop: " << idxLoop << std::endl;
 
 
                                 if(idxInitData == RANDOM){
@@ -319,19 +322,19 @@ void benmark512_v2(const std::string& inBasename){
                                 else if(idxInitData == NORMAL){
                                     std::random_device rd;
                                     std::mt19937 gen(0);
-                                    std::normal_distribution<double> dis(0, 1 + idxSizePerWarp/4);
+                                    std::normal_distribution<double> dis(0, 1 + idxSizePerBlock/4);
                                     for (int i = 0; i < int(h_array.size()); ++i) {
-                                        h_array[i] = std::max(0, std::min( idxSizePerWarp,int(dis(gen)+idxSizePerWarp/2)));
+                                        h_array[i] = std::max(0, std::min( idxSizePerBlock,int(dis(gen)+idxSizePerBlock/2)));
                                     }
                                 }
                                 else if(idxInitData == SORTED){
                                     for (int i = 0; i < int(h_array.size()); ++i) {
-                                        h_array[i] = i%idxSizePerWarp;
+                                        h_array[i] = i%idxSizePerBlock;
                                     }
                                 }
                                 else if(idxInitData == REVERSED){
                                     for (int i = 0; i < int(h_array.size()); ++i) {
-                                        h_array[i] = (idxSizePerWarp-1)-i%idxSizePerWarp;
+                                        h_array[i] = (idxSizePerBlock-1)-i%idxSizePerBlock;
                                     }
                                 }
                                 else{
@@ -346,14 +349,14 @@ void benmark512_v2(const std::string& inBasename){
                                 CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), h_array.size() * sizeof(int), cudaMemcpyHostToDevice));
 
                                 // Define execution configuration (threads per block and blocks per grid)
-                                const int NOrPow2 = GreaterPowerOf2EqualOrLarger(idxSizePerWarp);
+                                const int NOrPow2 = GreaterPowerOf2EqualOrLarger(idxSizePerBlock);
                                 const int threadsPerBlock = NOrPow2;
                                 const int blocksPerGrid = nbBlocks;
 
                                 CUDA_CHECK(cudaDeviceSynchronize());
                                 SpTimer timer;
 
-                                benchmarkSort512_v2<int, TestSorted, FullSM, AsynCpy><<<blocksPerGrid, threadsPerBlock, 2*NOrPow2*sizeof(int) >>>(d_array, idxSizePerWarp);
+                                benchmarkSort512_v2<int, TestSorted, FullSM, AsynCpy><<<blocksPerGrid, threadsPerBlock, 2*NOrPow2*sizeof(int) >>>(d_array, idxSizePerBlock);
 
                                 CUDA_CHECK(cudaDeviceSynchronize());
                                 timer.stop();
@@ -368,10 +371,10 @@ void benmark512_v2(const std::string& inBasename){
                                         << (FullSM?"TRUE":"FALSE") << "," 
                                         << (AsynCpy?"TRUE":"FALSE") << "," 
                                         << InitDataString(idxInitData) << "," 
-                                        << idxSizePerWarp << ","
+                                        << idxSizePerBlock << ","
                                         <<  timer.getElapsed() << ","
                                         << timer.getElapsed()/nbBlocks << "," 
-                                        << timer.getElapsed()/nbBlocks/double(idxSizePerWarp*std::log2(idxSizePerWarp)) << std::endl;
+                                        << timer.getElapsed()/nbBlocks/double(idxSizePerBlock*std::log2(idxSizePerBlock)) << std::endl;
                             }
                         }
                     }
