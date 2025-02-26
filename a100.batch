@@ -13,3 +13,5 @@ cd /projets/schnaps/cuda-sort/builda100
 cmake -DCMAKE_BUILD_TYPE=RELEASE -DCUDA_SM=80 ..
 make -j 4
 ./bench
+
+rm build*/core.*

@@ -13,3 +13,5 @@ cd /projets/schnaps/cuda-sort/buildrtx
 cmake -DCMAKE_BUILD_TYPE=RELEASE -DCUDA_SM=75 ..
 make -j 4
 ./bench
+
+rm build*/core.*
