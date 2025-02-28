@@ -120,6 +120,10 @@ public:
     }
 };
 
+////////////////////////////////////////////////////////////////////
+
+constexpr int NbLoops = 5;
+
 
 template <typename T, bool TestIfSorted, bool FullSM>
 __global__ void benchmarkSortSmall(T* dataToSort, const int nbValuesToSort) {
@@ -155,7 +159,7 @@ void benmark32(const std::string& inBasename){
             constexpr bool FullSM = bool_constant_fullsm.value;
             for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
                 for(int idxSizePerWarp = 1 ; idxSizePerWarp <= 32 ; ++idxSizePerWarp){
-                    for(int idxLoop = 0 ; idxLoop < 10 ; ++idxLoop){
+                    for(int idxLoop = 0 ; idxLoop < NbLoops ; ++idxLoop){
                         {
                             std::cout << "idxInitData: " << idxInitData << " idxSizePerWarp: " << idxSizePerWarp << " idxLoop: " << idxLoop << std::endl;
 
@@ -242,7 +246,7 @@ void benmark512(const std::string& inBasename){
                 constexpr bool AsynCpy = bool_constant_asynccpy.value;
                 for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
                     for(int idxSizePerBlock = 32 ; idxSizePerBlock <= DefaultNbThreadsPerBlock ; idxSizePerBlock += 32){
-                        for(int idxLoop = 0 ; idxLoop < 10 ; ++idxLoop){
+                        for(int idxLoop = 0 ; idxLoop < NbLoops ; ++idxLoop){
                             {
                                 std::cout << "idxInitData: " << idxInitData 
                                             << " idxSizePerBlock: " << idxSizePerBlock 
@@ -335,7 +339,7 @@ void benmark512_v2(const std::string& inBasename){
                 constexpr bool AsynCpy = bool_constant_asynccpy.value;
                 for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
                     for(int idxSizePerBlock = 32 ; idxSizePerBlock <= DefaultNbThreadsPerBlock ; idxSizePerBlock += 32){
-                        for(int idxLoop = 0 ; idxLoop < 10 ; ++idxLoop){
+                        for(int idxLoop = 0 ; idxLoop < NbLoops ; ++idxLoop){
                             {
                                 std::cout << "idxInitData: " << idxInitData 
                                             << " idxSizePerBlock: " << idxSizePerBlock << " idxLoop: " << idxLoop << std::endl;
@@ -434,7 +438,7 @@ void benmark512_v3(const std::string& inBasename){
                 for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
                     for(int idxThreads = 32 ; idxThreads <= DefaultNbThreadsPerBlock ; idxThreads += 32){
                         for(int idxSize = 32 ; idxSize <= MaxSize ; idxSize *= 2){
-                            for(int idxLoop = 0 ; idxLoop < 10 ; ++idxLoop){
+                            for(int idxLoop = 0 ; idxLoop < NbLoops ; ++idxLoop){
                                 const int nbBlocks = maxNbElements / idxSize;
                                 const int nbElements = idxSize*nbBlocks;
                                 {
@@ -524,7 +528,7 @@ void benmarkSortLarge(const std::string& inBasename){
                 constexpr bool AsynCpy = bool_constant_asynccpy.value;
                 for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
                     for(int idxSize = 512 ; idxSize < nbElements ; idxSize *= 2){
-                        for(int idxLoop = 0 ; idxLoop < 10 ; ++idxLoop){
+                        for(int idxLoop = 0 ; idxLoop < NbLoops ; ++idxLoop){
                             {
                                 std::cout << "idxInitData: " << idxInitData << " idxSize: " << idxSize << " idxLoop: " << idxLoop << std::endl;
 
@@ -595,7 +599,7 @@ void benmarkThrust(const std::string& inBasename){
 
     for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
         for(int idxSize = 512 ; idxSize < nbElements ; idxSize *= 2){
-            for(int idxLoop = 0 ; idxLoop < 10 ; ++idxLoop){
+            for(int idxLoop = 0 ; idxLoop < NbLoops ; ++idxLoop){
                 {
                     std::cout << "idxInitData: " << idxInitData << " idxSize: " << idxSize << " idxLoop: " << idxLoop << std::endl;
                     {
