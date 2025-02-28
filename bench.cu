@@ -435,7 +435,7 @@ void benmark512_v3(const std::string& inBasename){
                     for(int idxThreads = 32 ; idxThreads <= DefaultNbThreadsPerBlock ; idxThreads += 32){
                         for(int idxSize = 32 ; idxSize <= MaxSize ; idxSize *= 2){
                             for(int idxLoop = 0 ; idxLoop < 10 ; ++idxLoop){
-                                const int nbBlocks = maxNbElements / DefaultNbThreadsPerBlock;
+                                const int nbBlocks = maxNbElements / idxSize;
                                 const int nbElements = idxSize*nbBlocks;
                                 {
                                     std::cout << "idxInitData: " << idxInitData 
