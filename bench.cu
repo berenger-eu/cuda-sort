@@ -442,6 +442,8 @@ void benmark512_v3(const std::string& inBasename){
                                                 << " idxThreads: " << idxThreads 
                                                 << " idxLoop: " << idxLoop
                                                 << " idxSize " << idxSize
+                                                << " nbElements " << nbElements
+                                                << " sharedMem " << 2*idxSize*sizeof(int)
                                                 << std::endl;
 
                                     // Allocate device memory for the array
