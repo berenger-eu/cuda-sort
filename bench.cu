@@ -193,6 +193,7 @@ void benmark512(const std::string& inBasename){
                                             << " idxLoop: " << idxLoop << std::endl;
 
 
+                                SpTimer initTimer;
                                 if(idxInitData == RANDOM){
                                     std::random_device rd;
                                     std::mt19937 gen(0);
@@ -222,13 +223,18 @@ void benmark512(const std::string& inBasename){
                                 else{
                                     assert(0);
                                 }
+                                initTimer.stop();
+                                std::cout << "Init time: " << initTimer.getElapsed() << "s" << std::endl;
 
                                 // Allocate device memory for the array
                                 int* d_array = nullptr;
                                 CUDA_CHECK(cudaMalloc(&d_array, h_array.size() * sizeof(int)));
 
                                 // Copy data from host to device
+                                SpTimer copyTimer;
                                 CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), h_array.size() * sizeof(int), cudaMemcpyHostToDevice));
+                                copyTimer.stop();
+                                std::cout << "Copy time: " << copyTimer.getElapsed() << "s" << std::endl;
 
                                 // Define execution configuration (threads per block and blocks per grid)
                                 const int NOrPow2 = GreaterPowerOf2EqualOrLarger(idxSizePerBlock);
