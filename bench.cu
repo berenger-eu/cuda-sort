@@ -517,7 +517,7 @@ void benmarkSortLarge(const std::string& inBasename){
     std::cout << "Free memory: " << freeMem << std::endl;
     std::cout << "Total memory: " << totalMem << std::endl;
 
-    const int nbElements = std::min(1073741824UL, (freeMem / sizeof(int) / 3));
+    const int nbElements = std::min(268435456UL, (freeMem / sizeof(int) / 3));
     std::cout << "nbElements: " << nbElements << std::endl;
 
     for_bool([&](auto bool_constant_testsorted) {
@@ -527,7 +527,7 @@ void benmarkSortLarge(const std::string& inBasename){
             for_bool([&](auto bool_constant_asynccpy) {
                 constexpr bool AsynCpy = bool_constant_asynccpy.value;
                 for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
-                    for(int idxSize = 512 ; idxSize < nbElements ; idxSize *= 2){
+                    for(int idxSize = 512 ; idxSize <= nbElements ; idxSize *= 2){
                         for(int idxLoop = 0 ; idxLoop < NbLoops ; ++idxLoop){
                             {
                                 std::cout << "idxInitData: " << idxInitData << " idxSize: " << idxSize << " idxLoop: " << idxLoop << std::endl;
@@ -594,11 +594,11 @@ void benmarkThrust(const std::string& inBasename){
     std::cout << "Free memory: " << freeMem << std::endl;
     std::cout << "Total memory: " << totalMem << std::endl;
 
-    const int nbElements = std::min(1073741824UL, (freeMem / sizeof(int) / 3));
+    const int nbElements = std::min(268435456UL, (freeMem / sizeof(int) / 3));
     std::cout << "nbElements: " << nbElements << std::endl;
 
     for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
-        for(int idxSize = 512 ; idxSize < nbElements ; idxSize *= 2){
+        for(int idxSize = 512 ; idxSize <= nbElements ; idxSize *= 2){
             for(int idxLoop = 0 ; idxLoop < NbLoops ; ++idxLoop){
                 {
                     std::cout << "idxInitData: " << idxInitData << " idxSize: " << idxSize << " idxLoop: " << idxLoop << std::endl;
