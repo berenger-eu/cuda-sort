@@ -1,6 +1,6 @@
 #include "cusort.hpp"
 
-
+#include "valgen.hpp"
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
@@ -20,8 +20,10 @@ void testSmall() {
     const int MaxSize = std::min(int(MaxSharedMemSize / sizeof(int)), MaxThreadsPerBlock);
     std::cout << "Max size: " << MaxSize << std::endl;
 
+    CuRandManager<int> randManager;
+
     for(int idxSize = 32 ; idxSize <= MaxSize ; idxSize *= 2){
-        for(const bool randValues : {false, true}){
+        for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
             // Number of elements to sort
             const int N = idxSize;
             assert(N <= MaxSharedMemSize / sizeof(int));
@@ -33,32 +35,15 @@ void testSmall() {
             std::cout << " - Number of threads: " << NOrPow2 << std::endl;
             std::cout << " - Shared memory size: " << NOrPow2 * sizeof(int) << std::endl;
 
-            std::vector<int> h_array(N);
-            if(randValues){
-                // Create a host vector and fill it with random values (using C++11 random)
-                std::random_device rd;
-                std::mt19937 gen(0);
-                std::uniform_int_distribution<int> dis(0, 10000);
-                for (int i = 0; i < N; ++i) {
-                    h_array[i] = dis(gen);
-                }
-            }
-            else{
-                for (int i = 0; i < N; ++i) {
-                    h_array[i] = N-i;
-                }
-            }
-
-            // Make a copy of the host array and sort it using std::sort for later verification.
-            std::vector<int> h_sorted = h_array;
-            std::sort(h_sorted.begin(), h_sorted.end());
-
             // Allocate device memory for the array
             int* d_array = nullptr;
             CUDA_CHECK(cudaMalloc(&d_array, N * sizeof(int)));
 
-            // Copy data from host to device
-            CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), N * sizeof(int), cudaMemcpyHostToDevice));
+            randManager.initArray(d_array, idxSize, idxSize, idxInitData);
+
+            std::vector<int> h_sorted(N);
+            CUDA_CHECK(cudaMemcpy(h_sorted.data(), d_array, N * sizeof(int), cudaMemcpyDeviceToHost));
+            std::sort(h_sorted.begin(), h_sorted.end());
 
             // Define execution configuration (threads per block and blocks per grid)
             const int threadsPerBlock = NOrPow2;
@@ -96,7 +81,7 @@ void testSmall() {
     }
 
     for(int idxSize = 32 ; idxSize <= MaxSize ; idxSize *= 2){
-        for(const bool randValues : {false, true}){
+        for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
             // Number of elements to sort
             const int N = idxSize;
             assert(N <= MaxSharedMemSize / sizeof(int));
@@ -108,32 +93,15 @@ void testSmall() {
             std::cout << " - Number of threads: " << NOrPow2 << std::endl;
             std::cout << " - Shared memory size: " << NOrPow2 * sizeof(int) << std::endl;
 
-            std::vector<int> h_array(N);
-            if(randValues){
-                // Create a host vector and fill it with random values (using C++11 random)
-                std::random_device rd;
-                std::mt19937 gen(0);
-                std::uniform_int_distribution<int> dis(0, 10000);
-                for (int i = 0; i < N; ++i) {
-                    h_array[i] = dis(gen);
-                }
-            }
-            else{
-                for (int i = 0; i < N; ++i) {
-                    h_array[i] = N-i;
-                }
-            }
-
-            // Make a copy of the host array and sort it using std::sort for later verification.
-            std::vector<int> h_sorted = h_array;
-            std::sort(h_sorted.begin(), h_sorted.end());
-
             // Allocate device memory for the array
             int* d_array = nullptr;
             CUDA_CHECK(cudaMalloc(&d_array, N * sizeof(int)));
 
-            // Copy data from host to device
-            CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), N * sizeof(int), cudaMemcpyHostToDevice));
+            randManager.initArray(d_array, idxSize, idxSize, idxInitData);
+            
+            std::vector<int> h_sorted(N);
+            CUDA_CHECK(cudaMemcpy(h_sorted.data(), d_array, N * sizeof(int), cudaMemcpyDeviceToHost));
+            std::sort(h_sorted.begin(), h_sorted.end());
 
             // Define execution configuration (threads per block and blocks per grid)
             const int threadsPerBlock = NOrPow2;
@@ -172,7 +140,7 @@ void testSmall() {
 
 
     for(int idxSize = 32 ; idxSize <= MaxSize ; idxSize *= 3){
-        for(const bool randValues : {false, true}){
+        for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
             // Number of elements to sort
             const int N = idxSize;
             assert(N <= MaxSharedMemSize / sizeof(int));
@@ -184,32 +152,15 @@ void testSmall() {
             std::cout << " - Number of threads: " << NOrPow2 << std::endl;
             std::cout << " - Shared memory size: " << NOrPow2 * sizeof(int) << std::endl;
 
-            std::vector<int> h_array(N);
-            if(randValues){
-                // Create a host vector and fill it with random values (using C++11 random)
-                std::random_device rd;
-                std::mt19937 gen(0);
-                std::uniform_int_distribution<int> dis(0, 10000);
-                for (int i = 0; i < N; ++i) {
-                    h_array[i] = dis(gen);
-                }
-            }
-            else{
-                for (int i = 0; i < N; ++i) {
-                    h_array[i] = N-i;
-                }
-            }
-
-            // Make a copy of the host array and sort it using std::sort for later verification.
-            std::vector<int> h_sorted = h_array;
-            std::sort(h_sorted.begin(), h_sorted.end());
-
             // Allocate device memory for the array
             int* d_array = nullptr;
             CUDA_CHECK(cudaMalloc(&d_array, N * sizeof(int)));
 
-            // Copy data from host to device
-            CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), N * sizeof(int), cudaMemcpyHostToDevice));
+            randManager.initArray(d_array, idxSize, idxSize, idxInitData);
+            
+            std::vector<int> h_sorted(N);
+            CUDA_CHECK(cudaMemcpy(h_sorted.data(), d_array, N * sizeof(int), cudaMemcpyDeviceToHost));
+            std::sort(h_sorted.begin(), h_sorted.end());
 
             // Define execution configuration (threads per block and blocks per grid)
             const int threadsPerBlock = NOrPow2;
@@ -247,7 +198,7 @@ void testSmall() {
     }
 
     for(int idxSize = 32 ; idxSize <= MaxSize ; idxSize *= 3){
-        for(const bool randValues : {false, true}){
+        for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
             // Number of elements to sort
             const int N = idxSize;
             assert(N <= MaxSharedMemSize / sizeof(int));
@@ -259,32 +210,15 @@ void testSmall() {
             std::cout << " - Number of threads: " << NOrPow2 << std::endl;
             std::cout << " - Shared memory size: " << NOrPow2 * sizeof(int) << std::endl;
 
-            std::vector<int> h_array(N);
-            if(randValues){
-                // Create a host vector and fill it with random values (using C++11 random)
-                std::random_device rd;
-                std::mt19937 gen(0);
-                std::uniform_int_distribution<int> dis(0, 10000);
-                for (int i = 0; i < N; ++i) {
-                    h_array[i] = dis(gen);
-                }
-            }
-            else{
-                for (int i = 0; i < N; ++i) {
-                    h_array[i] = N-i;
-                }
-            }
-
-            // Make a copy of the host array and sort it using std::sort for later verification.
-            std::vector<int> h_sorted = h_array;
-            std::sort(h_sorted.begin(), h_sorted.end());
-
             // Allocate device memory for the array
             int* d_array = nullptr;
             CUDA_CHECK(cudaMalloc(&d_array, N * sizeof(int)));
 
-            // Copy data from host to device
-            CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), N * sizeof(int), cudaMemcpyHostToDevice));
+            randManager.initArray(d_array, idxSize, idxSize, idxInitData);
+            
+            std::vector<int> h_sorted(N);
+            CUDA_CHECK(cudaMemcpy(h_sorted.data(), d_array, N * sizeof(int), cudaMemcpyDeviceToHost));
+            std::sort(h_sorted.begin(), h_sorted.end());
 
             // Define execution configuration (threads per block and blocks per grid)
             const int threadsPerBlock = NOrPow2;
@@ -323,38 +257,21 @@ void testSmall() {
 
 
     for(int idxSize = 1 ; idxSize <= 32 ; ++idxSize){
-        for(const bool randValues : {false, true}){
+        for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
             // Number of elements to sort
             const int N = idxSize;
 
             std::cout << "Testing with " << N << " elements" << std::endl;
 
-            std::vector<int> h_array(N);
-            if(randValues){
-                // Create a host vector and fill it with random values (using C++11 random)
-                std::random_device rd;
-                std::mt19937 gen(0);
-                std::uniform_int_distribution<int> dis(0, 10000);
-                for (int i = 0; i < N; ++i) {
-                    h_array[i] = dis(gen);
-                }
-            }
-            else{
-                for (int i = 0; i < N; ++i) {
-                    h_array[i] = N-i;
-                }
-            }
-
-            // Make a copy of the host array and sort it using std::sort for later verification.
-            std::vector<int> h_sorted = h_array;
-            std::sort(h_sorted.begin(), h_sorted.end());
-
             // Allocate device memory for the array
             int* d_array = nullptr;
             CUDA_CHECK(cudaMalloc(&d_array, N * sizeof(int)));
 
-            // Copy data from host to device
-            CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), N * sizeof(int), cudaMemcpyHostToDevice));
+            randManager.initArray(d_array, idxSize, idxSize, idxInitData);
+            
+            std::vector<int> h_sorted(N);
+            CUDA_CHECK(cudaMemcpy(h_sorted.data(), d_array, N * sizeof(int), cudaMemcpyDeviceToHost));
+            std::sort(h_sorted.begin(), h_sorted.end());
 
             Sort_1Warp_SM_le32<int, TestIfSorted, FullSM><<<1,32>>>(d_array, N);
 
@@ -397,9 +314,11 @@ void testV3() {
     const int MaxSize = int(MaxSharedMemSize / sizeof(int) / 2);
     std::cout << "Max size: " << MaxSize << std::endl;
 
+    CuRandManager<int> randManager;
+
     for(int nbThreads = 32 ; nbThreads <= MaxThreadsPerBlock ; nbThreads += 32){
         for(int idxSize = 32 ; idxSize <= MaxSize ; idxSize *= 2){
-            for(const bool randValues : {false, true}){
+            for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
                 // Number of elements to sort
                 const int N = idxSize;
                 assert(N <= MaxSharedMemSize / sizeof(int));
@@ -411,32 +330,15 @@ void testV3() {
                 std::cout << " - SizePow2: " << NOrPow2 << std::endl;
                 std::cout << " - Shared memory size: " << 2 * NOrPow2 * sizeof(int) << std::endl;
 
-                std::vector<int> h_array(N);
-                if(randValues){
-                    // Create a host vector and fill it with random values (using C++11 random)
-                    std::random_device rd;
-                    std::mt19937 gen(0);
-                    std::uniform_int_distribution<int> dis(0, 10000);
-                    for (int i = 0; i < N; ++i) {
-                        h_array[i] = dis(gen);
-                    }
-                }
-                else{
-                    for (int i = 0; i < N; ++i) {
-                        h_array[i] = N-i;
-                    }
-                }
-
-                // Make a copy of the host array and sort it using std::sort for later verification.
-                std::vector<int> h_sorted = h_array;
-                std::sort(h_sorted.begin(), h_sorted.end());
-
                 // Allocate device memory for the array
                 int* d_array = nullptr;
                 CUDA_CHECK(cudaMalloc(&d_array, N * sizeof(int)));
 
-                // Copy data from host to device
-                CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), N * sizeof(int), cudaMemcpyHostToDevice));
+                randManager.initArray(d_array, idxSize, idxSize, idxInitData);
+            
+                std::vector<int> h_sorted(N);
+                CUDA_CHECK(cudaMemcpy(h_sorted.data(), d_array, N * sizeof(int), cudaMemcpyDeviceToHost));
+                std::sort(h_sorted.begin(), h_sorted.end());
 
                 // Define execution configuration (threads per block and blocks per grid)
                 const int threadsPerBlock = nbThreads;
@@ -478,7 +380,7 @@ void testV3() {
 
     for(int nbThreads = 32 ; nbThreads <= MaxThreadsPerBlock ; nbThreads += 32){
         for(int idxSize = 32 ; idxSize <= MaxSize ; idxSize *= 3){
-            for(const bool randValues : {false, true}){
+            for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
                 // Number of elements to sort
                 const int N = idxSize;
                 assert(N <= MaxSharedMemSize / sizeof(int));
@@ -490,32 +392,15 @@ void testV3() {
                 std::cout << " - SizePow2: " << NOrPow2 << std::endl;
                 std::cout << " - Shared memory size: " << 2 * NOrPow2 * sizeof(int) << std::endl;
 
-                std::vector<int> h_array(N);
-                if(randValues){
-                    // Create a host vector and fill it with random values (using C++11 random)
-                    std::random_device rd;
-                    std::mt19937 gen(0);
-                    std::uniform_int_distribution<int> dis(0, 10000);
-                    for (int i = 0; i < N; ++i) {
-                        h_array[i] = dis(gen);
-                    }
-                }
-                else{
-                    for (int i = 0; i < N; ++i) {
-                        h_array[i] = N-i;
-                    }
-                }
-
-                // Make a copy of the host array and sort it using std::sort for later verification.
-                std::vector<int> h_sorted = h_array;
-                std::sort(h_sorted.begin(), h_sorted.end());
-
                 // Allocate device memory for the array
                 int* d_array = nullptr;
                 CUDA_CHECK(cudaMalloc(&d_array, N * sizeof(int)));
 
-                // Copy data from host to device
-                CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), N * sizeof(int), cudaMemcpyHostToDevice));
+                randManager.initArray(d_array, idxSize, idxSize, idxInitData);
+            
+                std::vector<int> h_sorted(N);
+                CUDA_CHECK(cudaMemcpy(h_sorted.data(), d_array, N * sizeof(int), cudaMemcpyDeviceToHost));
+                std::sort(h_sorted.begin(), h_sorted.end());
 
                 // Define execution configuration (threads per block and blocks per grid)
                 const int threadsPerBlock = nbThreads;
@@ -563,8 +448,10 @@ void testLarge() {
     const int MaxSize = (1 << 20);
     std::cout << "Max size: " << MaxSize << std::endl;
 
+    CuRandManager<int> randManager;
+
     for(int idxSize = 32 ; idxSize < MaxSize ; idxSize *= 2){
-        for(const bool randValues : {false, true}){
+        for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
             // Number of elements to sort
             const int N = idxSize;
             const int NOrPow2 = GreaterPowerOf2EqualOrLarger(N);
@@ -572,32 +459,15 @@ void testLarge() {
 
             std::cout << "Testing with " << N << " elements" << std::endl;
 
-            std::vector<int> h_array(N);
-            if(randValues){
-                // Create a host vector and fill it with random values (using C++11 random)
-                std::random_device rd;
-                std::mt19937 gen(0);
-                std::uniform_int_distribution<int> dis(0, 10000);
-                for (int i = 0; i < N; ++i) {
-                    h_array[i] = dis(gen);
-                }
-            }
-            else{
-                for (int i = 0; i < N; ++i) {
-                    h_array[i] = N-i;
-                }
-            }
-
-            // Make a copy of the host array and sort it using std::sort for later verification.
-            std::vector<int> h_sorted = h_array;
-            std::sort(h_sorted.begin(), h_sorted.end());
-
             // Allocate device memory for the array
             int* d_array = nullptr;
             CUDA_CHECK(cudaMalloc(&d_array, N * sizeof(int)));
 
-            // Copy data from host to device
-            CUDA_CHECK(cudaMemcpy(d_array, h_array.data(), N * sizeof(int), cudaMemcpyHostToDevice));
+            randManager.initArray(d_array, idxSize, idxSize, idxInitData);
+            
+            std::vector<int> h_sorted(N);
+            CUDA_CHECK(cudaMemcpy(h_sorted.data(), d_array, N * sizeof(int), cudaMemcpyDeviceToHost));
+            std::sort(h_sorted.begin(), h_sorted.end());
 
             Sort<int, TestIfSorted, FullSM, ASyncCpyBito>(d_array, N);
 

@@ -12,6 +12,7 @@
 #include <cooperative_groups.h>
 #include <cooperative_groups/memcpy_async.h>
 #include <cuda/barrier>
+#include <math_constants.h>
 
 #include "SpTimer.hpp"
 
@@ -68,6 +69,75 @@ __device__ __forceinline__  constexpr T my_numeric_limits_min(){
         return 0;
     }
 }
+
+#ifdef __CUDA_ARCH__
+template <typename T>
+__device__ __forceinline__ T getNextVal(const T& val){
+    if constexpr (std::is_same<T, int>::value){
+        return val + 1;
+    }
+    else if(std::is_same<T, float>::value){
+        return std::nextafter(val, CUDART_INF_F);
+    }
+    else if(std::is_same<T, double>::value){
+        return std::nextafter(val, CUDART_INF);
+    }
+    else{
+        return 0;
+    }
+}
+
+template <typename T>
+__device__ __forceinline__ T getPrevVal(const T& val){
+    if constexpr (std::is_same<T, int>::value){
+        return val - 1;
+    }
+    else if(std::is_same<T, float>::value){
+        return std::nextafter(val, -CUDART_INF_F);
+    }
+    else if(std::is_same<T, double>::value){
+        return std::nextafter(val, -CUDART_INF);
+    }
+    else{
+        return 0;
+    }
+}
+
+#else
+
+template <typename T>
+inline __host__ T getNextVal(const T& val){
+    if constexpr (std::is_same<T, int>::value){
+        return val + 1;
+    }
+    else if(std::is_same<T, float>::value){
+        return std::nextafter(val, std::numeric_limits<float>::infinity());
+    }
+    else if(std::is_same<T, double>::value){
+        return std::nextafter(val, std::numeric_limits<double>::infinity());
+    }
+    else{
+        return 0;
+    }
+}
+
+template <typename T>
+inline __host__ T getPrevVal(const T& val){
+    if constexpr (std::is_same<T, int>::value){
+        return val - 1;
+    }
+    else if(std::is_same<T, float>::value){
+        return std::nextafter(val, -std::numeric_limits<float>::infinity());
+    }
+    else if(std::is_same<T, double>::value){
+        return std::nextafter(val, -std::numeric_limits<double>::infinity());
+    }
+    else{
+        return 0;
+    }
+}
+
+#endif // __CUDA_ARCH__
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
@@ -1048,29 +1118,39 @@ __global__ void Sort_core_buildPivots(T* dataToSort, const int nbValuesToSort, T
     // We copy values from the array to build the partition
     assert(gridDim.x == 1);
     assert(nbParts <= MaxParts);
+    assert(4 <= nbParts);
+    static_assert(((MaxParts - 1) & MaxParts) == 0, "MaxParts must be a power of 2");
     __shared__ T localPivots[MaxParts];
+
+    const int nbSubParts = nbParts-3;
     
-    if(threadIdx.x < nbParts){
-        const int step = nbValuesToSort/(nbParts+1);
-        localPivots[threadIdx.x] = dataToSort[min(nbValuesToSort-1, step*threadIdx.x)];
+    if(threadIdx.x < 2){
+        localPivots[threadIdx.x] = my_numeric_limits_min<T>();
+    } 
+    else if(threadIdx.x < nbParts){
+        const int step = nbValuesToSort/(nbSubParts+1);
+        localPivots[threadIdx.x] = dataToSort[min(nbValuesToSort-1, step*threadIdx.x-2)];
     }
     else if(threadIdx.x < MaxParts){
         localPivots[threadIdx.x] = my_numeric_limits_max<T>();
-    }
-    if(threadIdx.x == 0){
-        localPivots[0] = my_numeric_limits_min<T>();
-    }    
+    } 
     __syncthreads();
 
-    if(nbParts <= 32){
-        Core_Sort_1Warp_SM_le32_d<T, false, false>(localPivots, nbParts);
+    if(nbSubParts <= 32){
+        Core_Sort_1Warp_SM_le32_d<T, false, false>(localPivots, nbSubParts);
         // There is a syncthread in the function
     }
     else{
-        Core_Sort_1Block_SM_gt32_d<T, false, false>(localPivots, nbParts);
+        Core_Sort_1Block_SM_gt32_d<T, false, false>(localPivots, nbSubParts);
         // There is a syncthread in the function
     }
 
+    if(threadIdx.x == 0){
+        localPivots[1] = getPrevVal(localPivots[2]);
+        localPivots[nbParts-1] = getNextVal(localPivots[nbParts-2]);
+    }   
+    __syncthreads();
+    
     if(threadIdx.x < nbParts){
         pivots[threadIdx.x] = localPivots[threadIdx.x];
     }
@@ -1150,23 +1230,27 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
                                             counterParts+1,
                                             dataBuffer, NbParts);
 
+    int pivotsHost[NbParts];
+    CUDA_CHECK(cudaMemcpyAsync(pivotsHost, pivots, NbParts * sizeof(int), cudaMemcpyDeviceToHost, stream));
+
     CUDA_CHECK(cudaMemcpyAsync(dataToSort, dataBuffer, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice, stream));
     CUDA_CHECK(cudaFreeAsync(pivots, stream));
 
     SortPartitions<T, TestIfSorted, FullSM, ASyncCpyBito><<< NbParts, MaxThreadsPerBlock, MaxThreadsPerBlock*sizeof(T),stream>>>(dataToSort, nbValuesToSort, counterParts, NbParts);
 
     int counterPartsHost[NbParts+1];
-    CUDA_CHECK(cudaMemcpyAsync(counterPartsHost, counterParts, (NbParts+1) * sizeof(int), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(counterPartsHost, counterParts, (NbParts + 1) * sizeof(int), cudaMemcpyDeviceToHost, stream));
 
     // We need counterPartsHost and that sortPartitions is over
     CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaFreeAsync(counterParts, stream));    
-    
+
     for(int idxPart = 0 ; idxPart < NbParts ; idxPart++){
         const int start = counterPartsHost[idxPart];
         const int end = counterPartsHost[idxPart+1];
         const int size = end-start;
-        if(size > MaxThreadsPerBlock){
+        if(size > MaxThreadsPerBlock
+                && (idxPart == NbParts-1 || getNextVal(pivotsHost[idxPart]) < pivotsHost[idxPart+1])){
             Sort<T, TestIfSorted, FullSM, ASyncCpyBito, MinNbParts, MaxNbParts>(dataToSort+start, size, stream, dataBuffer);
         }
     }
