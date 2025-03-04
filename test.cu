@@ -311,7 +311,7 @@ void testV3() {
     std::cout << "Max threads per block: " << MaxThreadsPerBlock << std::endl;
     MaxThreadsPerBlock /= 2; // Does not work otherwise
     // Limit the size to this value
-    const int MaxSize = int(MaxSharedMemSize / sizeof(int) / 2);
+    const int MaxSize = std::min(DefaultMaxBitoSort, int(MaxSharedMemSize / sizeof(int) / 2));
     std::cout << "Max size: " << MaxSize << std::endl;
 
     CuRandManager<int> randManager;

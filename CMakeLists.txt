@@ -127,6 +127,10 @@ foreach(exec ${source_tests_files})
 	    ${execname}
 	    ${CUCSX_LIBRARIES}
 	    )
+	target_compile_options(${execname} PRIVATE
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-lineinfo --generate-line-info>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:RelWithDebInfo>>:-lineinfo --generate-line-info>
+    )
 endforeach(exec)
 
 

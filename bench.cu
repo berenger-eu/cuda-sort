@@ -325,7 +325,7 @@ void benmark512_v3(const std::string& inBasename){
     int MaxSharedMemSize;
     CUDA_CHECK(cudaDeviceGetAttribute(&MaxSharedMemSize, cudaDevAttrMaxSharedMemoryPerBlock, 0));
     std::cout << "Shared memory size: " << MaxSharedMemSize << std::endl;
-    const int MaxSize = int(MaxSharedMemSize / sizeof(int) / 2);
+    const int MaxSize = std::min(DefaultMaxBitoSort, int(MaxSharedMemSize / sizeof(int) / 2));
     std::cout << "Max size: " << MaxSize << std::endl;
 
 
