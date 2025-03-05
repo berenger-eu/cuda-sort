@@ -20,7 +20,7 @@
 ///////////////////////////////////////////////////////////////////////////
 
 constexpr const int DefaultNbThreadsPerBlock = 512;
-constexpr const int DefaultMaxBitoSort = 1024;
+constexpr const int DefaultMaxBitoSort = 4096;
 
 void CUDA_CHECK(cudaError_t err) {
     if (err != cudaSuccess) {
@@ -239,79 +239,81 @@ __device__ __forceinline__ void Core_Sort_1Warp_SM_le32_d(T* dataToSort, const i
     assert(nbValuesToSort <= 32);
     assert(32 <= blockDim.x);
 
-    if constexpr (TestIfSorted){
-        if(TestIfSorted_1Warp(dataToSort[threadIdx.x])){
-            return;
-        }
-    }
-
     // Only the first 32 threads are used
     if(threadIdx.x < 32){
-        unsigned laneId;
-        asm("mov.u32 %0, %%laneid;" : "=r"(laneId));
-        int vecincout = 0;
-        if constexpr (FullSM){
-            for(long int stepout = 1 ; stepout < 32 ; stepout *= 2){
-                {
-                    const int ffttout = (threadIdx.x & stepout);
-                    vecincout = vecincout + (ffttout? -stepout : stepout);
-                    const int vecpermute = threadIdx.x + vecincout;
-                    const T a = dataToSort[threadIdx.x];
-                    const T b = dataToSort[vecpermute];
-                    __syncwarp(0xffffffff);
-                    const T best = (ffttout ? max(a, b) : min(a, b));
-                    dataToSort[threadIdx.x] = best;
-                    __syncwarp(0xffffffff);
-                }
-        
-                for(long int step = stepout/2 ; step >= 1 ; step/=2){
-                    const int vecinc = step;
-                    const int fftt = (threadIdx.x & step);
-                    const int vecincout2 = (fftt? -vecinc  : vecinc);
-                    const int vecpermute = (threadIdx.x + vecincout2);
-                    const T a = dataToSort[threadIdx.x];
-                    const T b = dataToSort[vecpermute];
-                    __syncwarp(0xffffffff);
-                    const T best = (fftt ? max(a, b) : min(a, b));
-                    dataToSort[threadIdx.x] = best;
-                    __syncwarp(0xffffffff);
-                }
-
-                if constexpr (TestIfSorted){
-                    if(TestIfSorted_1Warp(dataToSort[threadIdx.x])){
-                        break;
-                    }
-                }
+        bool isSorted = false;
+        if constexpr (TestIfSorted){
+            if(TestIfSorted_1Warp(dataToSort[threadIdx.x])){
+                isSorted = true;
             }
         }
-        else{
-            const unsigned fullMask = 0xFFFFFFFF;
-            T a = dataToSort[threadIdx.x];
-            for(long int stepout = 1 ; stepout < 32 ; stepout *= 2){
-                {
-                    const int ffttout = (threadIdx.x & stepout);
-                    vecincout = vecincout + (ffttout? -stepout : stepout);
-                    const int vecpermute = (vecincout+laneId);
-                    const T b = __shfl_sync(fullMask, a, vecpermute);
-                    a = (ffttout ? max(a, b) : min(a, b));
-                }
-        
-                for(long int step = stepout/2 ; step >= 1 ; step/=2){
-                    const int vecinc = step;
-                    const int fftt = (threadIdx.x & step);
-                    const int vecincout2 = (fftt? -vecinc  : vecinc);
-                    const int vecpermute = (vecincout2+laneId);
-                    const T b = __shfl_sync(fullMask, a, vecpermute);
-                    a = (fftt ? max(a, b) : min(a, b));
-                }
+        if(isSorted == false){
+            unsigned laneId;
+            asm("mov.u32 %0, %%laneid;" : "=r"(laneId));
+            int vecincout = 0;
+            if constexpr (FullSM){
+                for(long int stepout = 1 ; stepout < 32 ; stepout *= 2){
+                    {
+                        const int ffttout = (threadIdx.x & stepout);
+                        vecincout = vecincout + (ffttout? -stepout : stepout);
+                        const int vecpermute = threadIdx.x + vecincout;
+                        const T a = dataToSort[threadIdx.x];
+                        const T b = dataToSort[vecpermute];
+                        __syncwarp(0xffffffff);
+                        const T best = (ffttout ? max(a, b) : min(a, b));
+                        dataToSort[threadIdx.x] = best;
+                        __syncwarp(0xffffffff);
+                    }
+            
+                    for(long int step = stepout/2 ; step >= 1 ; step/=2){
+                        const int vecinc = step;
+                        const int fftt = (threadIdx.x & step);
+                        const int vecincout2 = (fftt? -vecinc  : vecinc);
+                        const int vecpermute = (threadIdx.x + vecincout2);
+                        const T a = dataToSort[threadIdx.x];
+                        const T b = dataToSort[vecpermute];
+                        __syncwarp(0xffffffff);
+                        const T best = (fftt ? max(a, b) : min(a, b));
+                        dataToSort[threadIdx.x] = best;
+                        __syncwarp(0xffffffff);
+                    }
 
-                if constexpr (TestIfSorted){
-                    if(TestIfSorted_1Warp(a)){
-                        break;
+                    if constexpr (TestIfSorted){
+                        if(TestIfSorted_1Warp(dataToSort[threadIdx.x])){
+                            break;
+                        }
                     }
                 }
             }
-            dataToSort[threadIdx.x] = a;
+            else{
+                const unsigned fullMask = 0xFFFFFFFF;
+                T a = dataToSort[threadIdx.x];
+                for(long int stepout = 1 ; stepout < 32 ; stepout *= 2){
+                    {
+                        const int ffttout = (threadIdx.x & stepout);
+                        vecincout = vecincout + (ffttout? -stepout : stepout);
+                        const int vecpermute = (vecincout+laneId);
+                        const T b = __shfl_sync(fullMask, a, vecpermute);
+                        a = (ffttout ? max(a, b) : min(a, b));
+                    }
+            
+                    for(long int step = stepout/2 ; step >= 1 ; step/=2){
+                        const int vecinc = step;
+                        const int fftt = (threadIdx.x & step);
+                        const int vecincout2 = (fftt? -vecinc  : vecinc);
+                        const int vecpermute = (vecincout2+laneId);
+                        const T b = __shfl_sync(fullMask, a, vecpermute);
+                        a = (fftt ? max(a, b) : min(a, b));
+                    }
+
+                    if constexpr (TestIfSorted){
+                        if(TestIfSorted_1Warp(a)){
+                            break;
+                        }
+                    }
+                }
+                dataToSort[threadIdx.x] = a;
+            }
         }
     }
     __syncthreads();
@@ -1195,11 +1197,12 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
     // TODO CUDA_CHECK(cudaDeviceGetAttribute(&MaxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, 0));
     const int NOrPow2 = GreaterPowerOf2EqualOrLarger(nbValuesToSort);
     if(NOrPow2 <= DefaultMaxBitoSort){
+        const int nbThreads = std::min(NOrPow2, MaxThreadsPerBlock);
         if constexpr(ASyncCpyBito){
-            Sort_1Block_async_gt32_extsm_v3<T, TestIfSorted, FullSM><<<1,NOrPow2,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort, NOrPow2);
+            Sort_1Block_async_gt32_extsm_v3<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort, NOrPow2);
         }
         else{
-            Sort_1Block_gt32_extsm_v3<T, TestIfSorted, FullSM><<<1,NOrPow2,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort, NOrPow2);
+            Sort_1Block_gt32_extsm_v3<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort, NOrPow2);
         }
         return;
     }
