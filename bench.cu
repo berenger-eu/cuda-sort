@@ -361,7 +361,7 @@ void benmark512_v3(const std::string& inBasename){
 
                                     // Define execution configuration (threads per block and blocks per grid)
                                     const int NOrPow2 = GreaterPowerOf2EqualOrLarger(idxSize);
-                                    const int threadsPerBlock = NOrPow2;
+                                    const int threadsPerBlock = std::min(NOrPow2, DefaultNbThreadsPerBlock);
                                     const int blocksPerGrid = nbBlocks;
 
                                     CUDA_CHECK(cudaDeviceSynchronize());
