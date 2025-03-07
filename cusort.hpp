@@ -1184,7 +1184,7 @@ __global__ void SortPartitions(T* dataToSort, const int nbValuesToSort, const in
 }
 
 
-template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito, int MinNbParts = 32, int MaxNbParts = 64>
+template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito, int MinNbParts = 32, int MaxNbParts = 512>
 __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream = 0, T* dataBuffer = nullptr){
     static_assert(MaxNbParts <= DefaultNbThreadsPerBlock);
 
