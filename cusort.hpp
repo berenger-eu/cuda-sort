@@ -998,14 +998,17 @@ __device__ void CountParts_Grid_core(const T* data, const int size, const T* piv
     assert(nbParts <= MaxParts);
     __shared__ T localPivots[MaxParts];
 
-    if(threadIdx.x < nbParts){
-        localPivots[threadIdx.x] = pivots[threadIdx.x];
-        localCounters[threadIdx.x] = 0;
+    for(int idx = threadIdx.x ; idx < nbParts ; idx += blockDim.x){
+        localPivots[idx] = pivots[idx];
+        localCounters[idx] = 0;
     }
     __syncthreads();
 
     const int id = threadIdx.x + blockIdx.x * blockDim.x;
     const int numThreads = blockDim.x * gridDim.x;
+
+    int currentBucket = 0;
+    int currentCount = 0;
     
     for(int idxValue = id; idxValue < size; idxValue += numThreads){
         const T value = data[idxValue];
@@ -1013,8 +1016,14 @@ __device__ void CountParts_Grid_core(const T* data, const int size, const T* piv
         // Binary search on pivots
         const int bucket = binarySearch(localPivots, nbParts, value);
         assert(0 <= bucket && bucket < nbParts);
-        atomicAdd(&localCounters[bucket], 1);
+        if(bucket != currentBucket){
+            atomicAdd(&localCounters[currentBucket], currentCount);
+            currentBucket = bucket;
+            currentCount = 0;
+        }
+        currentCount += 1;
     }
+    atomicAdd(&localCounters[currentBucket], currentCount);
 
     __syncthreads();
 }
@@ -1024,14 +1033,15 @@ template <typename T, int MaxParts>
 __global__ void CountParts_Grid(const T* data, const int size, const T* pivots, int* counters, const int nbParts){
     // Nb threads must be power of 2
     assert(((blockDim.x - 1) & blockDim.x) == 0);
-    assert(blockDim.x >= nbParts);
 
     __shared__ int localCounters[MaxParts];
 
     CountParts_Grid_core<T, MaxParts>(data, size, pivots, counters, localCounters, nbParts);
 
-    if(threadIdx.x < nbParts){
-        atomicAdd(&counters[threadIdx.x], localCounters[threadIdx.x]);
+    for(int idx = threadIdx.x ; idx < nbParts ; idx += blockDim.x){
+        if(localCounters[idx]){
+            atomicAdd(&counters[idx], localCounters[idx]);
+        }
     }
     __syncthreads();
 }
@@ -1040,15 +1050,16 @@ template <typename T, int MaxParts>
 __global__ void MoveElements_Grid(T* data, const int size, const T* pivots, int* counters, T* dataBuffer, const int nbParts){
     // Nb threads must be power of 2
     assert(((blockDim.x - 1) & blockDim.x) == 0);
-    assert(blockDim.x >= nbParts);
 
     __shared__ int localCounters[MaxParts];
     CountParts_Grid_core<T, MaxParts>(data, size, pivots, counters, localCounters, nbParts);
     __syncthreads();
 
     __shared__ int localGOffset[MaxParts];
-    if(threadIdx.x < nbParts){
-        localGOffset[threadIdx.x] = atomicAdd(&counters[threadIdx.x], localCounters[threadIdx.x]);
+    for(int idx = threadIdx.x ; idx < nbParts ; idx += blockDim.x){
+        if(localCounters[idx]){
+            localGOffset[idx] = atomicAdd(&counters[idx], localCounters[idx]);
+        }
     }
     __syncthreads();
 
@@ -1130,21 +1141,27 @@ __global__ void Sort_core_buildPivots(T* dataToSort, const int nbValuesToSort, T
     if(threadIdx.x < 2){
         localPivots[threadIdx.x] = my_numeric_limits_min<T>();
     } 
-    else if(threadIdx.x < nbParts){
+    for(int idx = threadIdx.x + 2 ; idx < nbParts ; idx += blockDim.x){
         const int step = nbValuesToSort/(nbSubParts+1);
-        localPivots[threadIdx.x] = dataToSort[min(nbValuesToSort-1, step*threadIdx.x-2)];
+        localPivots[idx] = dataToSort[min(nbValuesToSort-1, step*idx-2)];
     }
-    else if(threadIdx.x < MaxParts){
-        localPivots[threadIdx.x] = my_numeric_limits_max<T>();
+    for(int idx = threadIdx.x + nbParts ; idx < MaxParts ; idx += blockDim.x){
+        localPivots[idx] = my_numeric_limits_max<T>();
     } 
     __syncthreads();
 
-    if(nbSubParts <= 32){
-        Core_Sort_1Warp_SM_le32_d<T, false, false>(localPivots, nbSubParts);
+    if(nbParts <= 32){
+        Core_Sort_1Warp_SM_le32_d<T, false, false>(localPivots, nbParts);
         // There is a syncthread in the function
     }
-    else{
-        Core_Sort_1Block_SM_gt32_d<T, false, false>(localPivots, nbSubParts);
+    else if(nbParts <= 512){
+        Core_Sort_1Block_SM_gt32_d<T, false, false>(localPivots, nbParts);
+        // There is a syncthread in the function
+    }
+    else {
+        __shared__ T buffer[MaxParts];
+        Core_Sort_1Block_SM_gt32_d_v3<T, false, false>(localPivots, nbParts,
+                                                            buffer, MaxParts);
         // There is a syncthread in the function
     }
 
@@ -1154,7 +1171,7 @@ __global__ void Sort_core_buildPivots(T* dataToSort, const int nbValuesToSort, T
     }   
     __syncthreads();
     
-    if(threadIdx.x < nbParts){
+    for(int idx = threadIdx.x ; idx < nbParts ; idx += blockDim.x){
         pivots[threadIdx.x] = localPivots[threadIdx.x];
     }
     __syncthreads();
@@ -1184,10 +1201,8 @@ __global__ void SortPartitions(T* dataToSort, const int nbValuesToSort, const in
 }
 
 
-template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito, int MinNbParts = 32, int MaxNbParts = 512>
+template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito, int MinNbParts = 32, int MaxNbParts = 1024>
 __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream = 0, T* dataBuffer = nullptr){
-    static_assert(MaxNbParts <= DefaultNbThreadsPerBlock);
-
     if(nbValuesToSort <= 32){
         Sort_1Warp_SM_le32<T, TestIfSorted, FullSM><<<1,32,0,stream>>>(dataToSort, nbValuesToSort);
         return;
