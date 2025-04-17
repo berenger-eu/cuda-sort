@@ -972,6 +972,51 @@ __global__ void Sort_1Block_async_gt32_extsm_v3(T* dataToSort, const int nbValue
 }
 
 
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+
+
+template <class ElementType, typename IndexType>
+__device__ void BuildPrefix_SM_device(ElementType* prefix, IndexType N) {
+    // Upward pass
+    IndexType js = 2;
+    while (js <= N) {
+        IndexType jsd2 = js / 2;
+        for (IndexType idN = threadIdx.x*js + js - 1; idN < N; idN += blockDim.x*js) {
+            prefix[idN] += prefix[idN - jsd2];
+        }
+        js *= 2;
+        __syncthreads();
+    }
+
+    // Downward pass
+    js = max(4, js/2);
+    while (js > 1) {
+        IndexType jsd2 = js / 2;
+        for (IndexType idN = threadIdx.x*js + js + jsd2 - 1; idN < N; idN += blockDim.x*js) {
+            prefix[idN] += prefix[idN - jsd2];
+        }
+        js = jsd2;
+        __syncthreads();
+    }
+}
+
+template <typename NumType, typename IndexType, const int MaxNbParts>
+__global__ void BuildPrefix_SM( NumType* prefixTree, const IndexType inSize){
+    __shared__ IndexType buffer[MaxNbParts];
+
+    for(IndexType idx = threadIdx.x ; idx < inSize ; idx += blockDim.x){
+        buffer[idx] = prefixTree[idx];
+    }
+    __syncthreads();
+
+    BuildPrefix_SM_device(buffer, inSize);
+
+    for(IndexType idx = threadIdx.x ; idx < inSize ; idx += blockDim.x){
+        prefixTree[idx] = buffer[idx];
+    }
+    __syncthreads();
+}
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
@@ -1049,80 +1094,77 @@ __global__ void CountParts_Grid(const T* data, const int size, const T* pivots, 
 template <typename T, int MaxParts>
 __global__ void MoveElements_Grid(T* data, const int size, const T* pivots, int* counters, T* dataBuffer, const int nbParts){
     // Nb threads must be power of 2
+    assert(nbParts <= MaxParts);
     assert(((blockDim.x - 1) & blockDim.x) == 0);
+    assert(blockDim.x <= DefaultNbThreadsPerBlock);
 
-    __shared__ int localCounters[MaxParts];
-    CountParts_Grid_core<T, MaxParts>(data, size, pivots, counters, localCounters, nbParts);
-    __syncthreads();
+    __shared__ T localPivots[MaxParts];
 
-    __shared__ int localGOffset[MaxParts];
     for(int idx = threadIdx.x ; idx < nbParts ; idx += blockDim.x){
-        if(localCounters[idx]){
-            localGOffset[idx] = atomicAdd(&counters[idx], localCounters[idx]);
-        }
+        localPivots[idx] = pivots[idx];
     }
     __syncthreads();
 
-    const int id = threadIdx.x + blockIdx.x * blockDim.x;
-    const int numThreads = blockDim.x * gridDim.x;
-    
-    for(int idxValue = id; idxValue < size; idxValue += numThreads){
-        const T value = data[idxValue];
+    __shared__ int localCounters[MaxParts+1];
+    __shared__ int localGOffset[MaxParts];
+    __shared__ T localBuffer[DefaultNbThreadsPerBlock];
+    __shared__ int localTargetPos[DefaultNbThreadsPerBlock];
 
-        // Binary search on pivots
-        const int bucket = binarySearch(pivots, nbParts, value);
-        assert(0 <= bucket && bucket < nbParts);
-        const int insertPosition = atomicAdd(&localGOffset[bucket], 1);
-        dataBuffer[insertPosition] = value;
-    }
-}
+    const int nbChunks = (size + blockDim.x - 1) / blockDim.x;
 
+    for (int idxChunk = blockIdx.x; idxChunk < nbChunks; idxChunk += gridDim.x) {
+        const int idxValue = idxChunk*blockDim.x + threadIdx.x;
 
-///////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////
-
-
-template <class ElementType, typename IndexType>
-__device__ void BuildPrefix_SM_device(ElementType* prefix, IndexType N) {
-    // Upward pass
-    IndexType js = 2;
-    while (js <= N) {
-        IndexType jsd2 = js / 2;
-        for (IndexType idN = threadIdx.x*js + js - 1; idN < N; idN += blockDim.x*js) {
-            prefix[idN] += prefix[idN - jsd2];
+        if(threadIdx.x == 0){
+            localCounters[0] = 0;
         }
-        js *= 2;
+        for(int idx = threadIdx.x ; idx < nbParts ; idx += blockDim.x){
+            localCounters[idx+1] = 0;
+            localGOffset[idx] = 0;
+        }
+        __syncthreads();
+
+        T value;
+        int bucket;
+        int positionInBucket;
+        if(idxValue < size){
+            value = data[idxValue];
+            bucket = binarySearch(localPivots, nbParts, value);
+            assert(0 <= bucket && bucket < nbParts);
+            positionInBucket = atomicAdd(&localCounters[bucket+1], 1);
+        }
+
+        __syncthreads();
+
+        for(int idx = threadIdx.x ; idx < nbParts ; idx += blockDim.x){
+            if(localCounters[idx+1]){
+                localGOffset[idx] = atomicAdd(&counters[idx], localCounters[idx+1]);
+                assert(localGOffset[idx] < size);
+            }
+        }
+        __syncthreads();
+
+        // prefix sum
+        BuildPrefix_SM_device(localCounters+1, nbParts);
+        __syncthreads();
+
+        if(idxValue < size){
+            const int insertPositionLocal = atomicAdd(&localCounters[bucket], 1);
+            assert(0 <= insertPositionLocal && insertPositionLocal < DefaultNbThreadsPerBlock);
+            localBuffer[insertPositionLocal] = value;
+            localTargetPos[insertPositionLocal] = localGOffset[bucket] + positionInBucket;
+            assert(0 <= localTargetPos[insertPositionLocal] && localTargetPos[insertPositionLocal] < size);
+        }
+        __syncthreads();
+
+        if(idxValue < size){
+            dataBuffer[localTargetPos[threadIdx.x]] = localBuffer[threadIdx.x];
+        }
         __syncthreads();
     }
-
-    // Downward pass
-    js = max(4, js/2);
-    while (js > 1) {
-        IndexType jsd2 = js / 2;
-        for (IndexType idN = threadIdx.x*js + js + jsd2 - 1; idN < N; idN += blockDim.x*js) {
-            prefix[idN] += prefix[idN - jsd2];
-        }
-        js = jsd2;
-        __syncthreads();
-    }
 }
 
-template <typename NumType, typename IndexType, const int MaxNbParts>
-__global__ void BuildPrefix_SM( NumType* prefixTree, const IndexType inSize){
-    __shared__ IndexType buffer[MaxNbParts];
 
-    for(IndexType idx = threadIdx.x ; idx < inSize ; idx += blockDim.x){
-        buffer[idx] = prefixTree[idx];
-    }
-    __syncthreads();
-
-    BuildPrefix_SM_device(buffer, inSize);
-
-    for(IndexType idx = threadIdx.x ; idx < inSize ; idx += blockDim.x){
-        prefixTree[idx] = buffer[idx];
-    }
-    __syncthreads();
-}
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
@@ -1240,7 +1282,14 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
     CUDA_CHECK(cudaMallocAsync(&counterParts, (NbParts+2) * sizeof(int), stream));
     CUDA_CHECK(cudaMemsetAsync(counterParts, 0, (NbParts+2) * sizeof(int), stream));
 
-    const int nbThreadBlock = (nbValuesToSort+MaxThreadsPerBlock-1)/MaxThreadsPerBlock;
+    int deviceID;
+    CUDA_CHECK(cudaGetDevice(&deviceID));
+
+    cudaDeviceProp deviceProp;
+    CUDA_CHECK( cudaGetDeviceProperties(&deviceProp, deviceID) );
+    const int numSMs = deviceProp.multiProcessorCount;
+
+    const int nbThreadBlock = (numSMs*2);
     CountParts_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock, 0, stream >>>(dataToSort, nbValuesToSort, pivots, counterParts+2, NbParts);
 
     BuildPrefix_SM<T, int, MaxNbParts><<<1,NbParts,0,stream>>>(counterParts+2, NbParts);
