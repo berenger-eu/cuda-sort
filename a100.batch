@@ -11,6 +11,7 @@ source /projets/schnaps/cuda-sort/modules
 mkdir /projets/schnaps/cuda-sort/builda100
 cd /projets/schnaps/cuda-sort/builda100
 cmake -DCMAKE_BUILD_TYPE=RELEASE -DCUDA_SM=80 ..
+make clean
 make -j 4
 ./bench
 

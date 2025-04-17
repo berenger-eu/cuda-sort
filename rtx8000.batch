@@ -11,6 +11,7 @@ source /projets/schnaps/cuda-sort/modules
 mkdir /projets/schnaps/cuda-sort/buildrtx
 cd /projets/schnaps/cuda-sort/buildrtx
 cmake -DCMAKE_BUILD_TYPE=RELEASE -DCUDA_SM=75 ..
+make clean
 make -j 4
 ./bench
 
