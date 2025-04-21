@@ -1332,4 +1332,216 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
 
 
 
+/////////////////////////////////////////////////////////////////////////////
+
+
+template <typename T, int nbMergeValuesPerBlock>
+__global__ void mergeKernel(
+    const T* __restrict__ partValues,
+    T*       __restrict__ mergeValues,
+    int partSize,
+    int totalNbValues
+) {
+    // 1) calcul des indices de paire et de chunk
+    const int nbMergeValues     = 2 * partSize;  // longueur max d'une fusion
+    const int nbBlocksPerMerge  = (nbMergeValues + nbMergeValuesPerBlock - 1)
+                                  / nbMergeValuesPerBlock;
+    int mergeIdx        = blockIdx.x / nbBlocksPerMerge;
+    int blockIdxInMerge = blockIdx.x % nbBlocksPerMerge;
+    int mergeStart      = mergeIdx * nbMergeValues;
+    if (mergeStart >= totalNbValues) return;
+
+    // tailles effectives de A et B à ce bord
+    int sizeA = min(partSize, totalNbValues - mergeStart);
+    int sizeB = min(partSize,
+                    max(0, totalNbValues - mergeStart - sizeA));
+    int totalL = sizeA + sizeB;
+
+    int D0_chunk = blockIdxInMerge * nbMergeValuesPerBlock;
+    int D1_chunk = min(D0_chunk + nbMergeValuesPerBlock, totalL);
+
+    // pointeurs sur la paire de runs à fusionner
+    const T* runPartA = partValues + mergeStart;
+    const T* runPartB = partValues + mergeStart + sizeA;
+    T*       runMerge = mergeValues + mergeStart + D0_chunk;
+
+    // 2) le premier thread détermine les bornes de son chunk via binary‑search
+    __shared__ int cpyFirstA_s, cpyFirstB_s, cpyLastA_s, cpyLastB_s;
+    if (threadIdx.x == 0) {
+        // bornes en nombre d'éléments pour ce block
+        int D0 = blockIdxInMerge * nbMergeValuesPerBlock;
+        int D1 = min(D0 + nbMergeValuesPerBlock, totalL);
+
+        // recherche p_start / q_start
+        int lo = max(0, D0 - sizeB), hi = min(sizeA, D0);
+        while (lo < hi) {
+            int mid = (lo + hi) >> 1;
+            int q   = D0 - mid;
+            if (mid < sizeA && q > 0 && runPartA[mid] < runPartB[q-1])
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        cpyFirstA_s = lo;
+        cpyFirstB_s = D0 - lo;
+
+        // recherche p_end / q_end
+        lo = max(0, D1 - sizeB);
+        hi = min(sizeA, D1);
+        while (lo < hi) {
+            int mid = (lo + hi) >> 1;
+            int q   = D1 - mid;
+            if (mid < sizeA && q > 0 && runPartA[mid] < runPartB[q-1])
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        cpyLastA_s = lo;
+        cpyLastB_s = D1 - lo;
+    }
+    __syncthreads();
+
+    // 3) on récupère ces bornes et calcule la taille locale
+    int firstA = cpyFirstA_s, firstB = cpyFirstB_s;
+    int lastA  = cpyLastA_s,  lastB  = cpyLastB_s;
+    int localA = lastA  - firstA;
+    int localB = lastB  - firstB;
+    int localL = localA + localB;
+
+    // 4) buffers partagés pour inputs et output
+    __shared__ T dataBuffer[nbMergeValuesPerBlock*2];
+    T* bufA = &dataBuffer[0];
+    T* bufB = bufA+localA;
+    T* bufM = bufB+localB;
+
+    // 5) copie coalescée des inputs dans shared mem
+    for (int i = threadIdx.x; i < localA; i += blockDim.x) {
+        bufA[i] = runPartA[firstA + i];
+    }
+    for (int i = threadIdx.x; i < localB; i += blockDim.x) {
+        bufB[i] = runPartB[firstB + i];
+    }
+    __syncthreads();
+
+    // 6) merge‑path local : on partitionne [0..localL) entre threads
+    int D0 = (threadIdx.x * localL) / blockDim.x;
+    int D1 = ((threadIdx.x+1) * localL) / blockDim.x;
+
+    // trouver p_start2 / q_start2 pour D0
+    int lo = max(0, D0 - localB), hi = min(localA, D0);
+    while (lo < hi) {
+        int mid = (lo + hi) >> 1;
+        int q   = D0 - mid;
+        if (mid < localA && q > 0 && bufA[mid] < bufB[q-1])
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    int iA = lo, jB = D0 - lo;
+
+    // trouver p_end2 / q_end2 pour D1
+    lo = max(0, D1 - localB);
+    hi = min(localA, D1);
+    while (lo < hi) {
+        int mid = (lo + hi) >> 1;
+        int q   = D1 - mid;
+        if (mid < localA && q > 0 && bufA[mid] < bufB[q-1])
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    int iA_end = lo, jB_end = D1 - lo;
+
+    // 7) fusion séquentielle dans bufM[D0..D1)
+    for (int k = D0; k < D1; ++k) {
+        if (jB >= localB || (iA < localA && bufA[iA] <= bufB[jB]))
+            bufM[k] = bufA[iA++];
+        else
+            bufM[k] = bufB[jB++];
+    }
+    __syncthreads();
+
+    // 8) écriture coalescée en mémoire globale
+    for (int k = D0; k < D1; ++k) {
+        runMerge[k] = bufM[k];
+    }
+    __syncthreads();
+}  
+
+
+template <typename T>
+__global__ void SortChunks(T* dataToSort, const int nbValuesToSort){
+    const int nbChunks = (nbValuesToSort + DefaultMaxBitoSort - 1) / DefaultMaxBitoSort;
+    for(int idxChunk = blockIdx.x ; idxChunk < nbChunks; idxChunk += gridDim.x){
+        const int start = idxChunk*DefaultMaxBitoSort;
+        const int end = min(start+DefaultMaxBitoSort, nbValuesToSort);
+        const int size = end-start;
+        if(size <= 32){
+            Sort_1Warp_SM_le32_d<T, false, false>(dataToSort+start, size);
+        }
+        else if(size <= DefaultMaxBitoSort){
+            const int NOrPow2 = GreaterPowerOf2EqualOrLarger(size);
+            assert(NOrPow2 <= DefaultMaxBitoSort);
+            Sort_1Block_gt32_d_extsm_v3<T, false, false>(dataToSort+start, size, NOrPow2);
+        }
+    }
+}
+
+template <typename T>
+__host__ void SortMerge(T* dataToSort, const int nbValuesToSort, cudaStream_t stream = 0){
+    constexpr bool TestIfSorted = false;
+    constexpr bool FullSM = false;
+
+    if(nbValuesToSort <= 32){
+        Sort_1Warp_SM_le32<T, TestIfSorted, FullSM><<<1,32,0,stream>>>(dataToSort, nbValuesToSort);
+        return;
+    }
+
+    int MaxThreadsPerBlock = DefaultNbThreadsPerBlock;
+    // TODO CUDA_CHECK(cudaDeviceGetAttribute(&MaxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, 0));
+    const int NOrPow2 = GreaterPowerOf2EqualOrLarger(nbValuesToSort);
+    if(NOrPow2 <= DefaultMaxBitoSort){
+        const int nbThreads = std::min(NOrPow2, MaxThreadsPerBlock);
+        Sort_1Block_gt32_extsm_v3<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort, NOrPow2);
+        return;
+    }
+
+    // Sort chunks
+    const int NbBlocks = (nbValuesToSort + DefaultMaxBitoSort - 1) / DefaultMaxBitoSort;
+    SortChunks<T><<<NbBlocks, DefaultNbThreadsPerBlock, DefaultMaxBitoSort*2*sizeof(T), stream>>>(dataToSort, nbValuesToSort);
+
+    T* dataBuffer = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&dataBuffer, nbValuesToSort * sizeof(T), stream));
+
+    T* ptr1 = dataToSort;
+    T* ptr2 = dataBuffer;
+
+    const int gridX = (nbValuesToSort + DefaultMaxBitoSort - 1)/DefaultMaxBitoSort;
+
+    for (int run_size = DefaultMaxBitoSort; run_size < nbValuesToSort; run_size *= 2) {        
+        // on lance num_pairs blocs
+        mergeKernel<T, DefaultMaxBitoSort><<< gridX, DefaultNbThreadsPerBlock, 0, stream >>>(
+            /* entrée */  ptr1,               
+            /* sortie */ ptr2,            
+            /* run_size */
+            run_size,
+            /* N */
+            nbValuesToSort
+        );
+        
+        // swap ptrs
+        std::swap(ptr1, ptr2);
+    }
+
+    // Ensure that dataToSort holds the latest values
+    if (ptr1 != dataToSort) {
+        CUDA_CHECK(cudaMemcpyAsync(dataToSort, ptr1, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice, stream));
+    }
+    // Free the buffer
+    CUDA_CHECK(cudaFreeAsync(dataBuffer, stream));
+    // Synchronize the stream to ensure all operations are complete
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+}
+
+
 #endif
