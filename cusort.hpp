@@ -1289,7 +1289,7 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
     CUDA_CHECK( cudaGetDeviceProperties(&deviceProp, deviceID) );
     const int numSMs = deviceProp.multiProcessorCount;
 
-    const int nbThreadBlock = (numSMs*2);
+    const int nbThreadBlock =  (nbValuesToSort+MaxThreadsPerBlock-1)/MaxThreadsPerBlock;// (numSMs*2);
     CountParts_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock, 0, stream >>>(dataToSort, nbValuesToSort, pivots, counterParts+2, NbParts);
 
     BuildPrefix_SM<T, int, MaxNbParts><<<1,NbParts,0,stream>>>(counterParts+2, NbParts);
