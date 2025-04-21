@@ -1539,8 +1539,6 @@ __host__ void SortMerge(T* dataToSort, const int nbValuesToSort, cudaStream_t st
     }
     // Free the buffer
     CUDA_CHECK(cudaFreeAsync(dataBuffer, stream));
-    // Synchronize the stream to ensure all operations are complete
-    CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
 
