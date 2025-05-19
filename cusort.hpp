@@ -1422,19 +1422,19 @@ __global__ void mergeKernel(
 }  
 
 
-template <typename T>
+template <typename T, const int MaxValuesToSort>
 __global__ void SortChunks(T* dataToSort, const int nbValuesToSort){
-    const int nbChunks = (nbValuesToSort + DefaultMaxBitoSort - 1) / DefaultMaxBitoSort;
+    const int nbChunks = (nbValuesToSort + MaxValuesToSort - 1) / MaxValuesToSort;
     for(int idxChunk = blockIdx.x ; idxChunk < nbChunks; idxChunk += gridDim.x){
-        const int start = idxChunk*DefaultMaxBitoSort;
-        const int end = min(start+DefaultMaxBitoSort, nbValuesToSort);
+        const int start = idxChunk*MaxValuesToSort;
+        const int end = min(start+MaxValuesToSort, nbValuesToSort);
         const int size = end-start;
         if(size <= 32){
             Sort_1Warp_SM_le32_d<T, false, false>(dataToSort+start, size);
         }
-        else if(size <= DefaultMaxBitoSort){
+        else if(size <= MaxValuesToSort){
             const int NOrPow2 = GreaterPowerOf2EqualOrLarger(size);
-            assert(NOrPow2 <= DefaultMaxBitoSort);
+            assert(NOrPow2 <= MaxValuesToSort);
             Sort_1Block_gt32_d_extsm_v3<T, false, false>(dataToSort+start, size, NOrPow2);
         }
     }
@@ -1450,18 +1450,19 @@ __host__ void SortMerge(T* dataToSort, const int nbValuesToSort, cudaStream_t st
         return;
     }
 
-    int MaxThreadsPerBlock = DefaultNbThreadsPerBlock;
     // TODO CUDA_CHECK(cudaDeviceGetAttribute(&MaxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, 0));
     const int NOrPow2 = GreaterPowerOf2EqualOrLarger(nbValuesToSort);
     if(NOrPow2 <= DefaultMaxBitoSort){
+        const int MaxThreadsPerBlock = DefaultNbThreadsPerBlock;
         const int nbThreads = std::min(NOrPow2, MaxThreadsPerBlock);
         Sort_1Block_gt32_extsm_v3<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort, NOrPow2);
         return;
     }
 
     // Sort chunks
-    const int NbBlocks = (nbValuesToSort + DefaultMaxBitoSort - 1) / DefaultMaxBitoSort;
-    SortChunks<T><<<NbBlocks, DefaultNbThreadsPerBlock, DefaultMaxBitoSort*2*sizeof(T), stream>>>(dataToSort, nbValuesToSort);
+    const int MaxValuesToSort = 1024;
+    const int NbBlocks = (nbValuesToSort + MaxValuesToSort - 1) / MaxValuesToSort;
+    SortChunks<T, MaxValuesToSort><<<NbBlocks, DefaultNbThreadsPerBlock, MaxValuesToSort*2*sizeof(T), stream>>>(dataToSort, nbValuesToSort);
 
     T* dataBuffer = nullptr;
     CUDA_CHECK(cudaMallocAsync(&dataBuffer, nbValuesToSort * sizeof(T), stream));
@@ -1469,11 +1470,28 @@ __host__ void SortMerge(T* dataToSort, const int nbValuesToSort, cudaStream_t st
     T* ptr1 = dataToSort;
     T* ptr2 = dataBuffer;
 
-    const int gridX = (nbValuesToSort + DefaultMaxBitoSort - 1)/DefaultMaxBitoSort;
+    const int IdealMergeSize = 2048;
 
-    for (int run_size = DefaultMaxBitoSort; run_size < nbValuesToSort; run_size *= 2) {        
+    for (int run_size = MaxValuesToSort; run_size < nbValuesToSort && run_size < IdealMergeSize ; run_size *= 2) {   
+        const int gridX = (nbValuesToSort + MaxValuesToSort - 1)/MaxValuesToSort;     
         // on lance num_pairs blocs
-        mergeKernel<T, DefaultMaxBitoSort><<< gridX, DefaultNbThreadsPerBlock, 0, stream >>>(
+        mergeKernel<T, MaxValuesToSort><<< gridX, DefaultNbThreadsPerBlock, 0, stream >>>(
+            /* entrée */  ptr1,               
+            /* sortie */ ptr2,            
+            /* run_size */
+            run_size,
+            /* N */
+            nbValuesToSort
+        );
+        
+        // swap ptrs
+        std::swap(ptr1, ptr2);
+    }
+
+    for (int run_size = IdealMergeSize; run_size < nbValuesToSort; run_size *= 2) {   
+        const int gridX = (nbValuesToSort + IdealMergeSize - 1)/IdealMergeSize;     
+        // on lance num_pairs blocs
+        mergeKernel<T, IdealMergeSize><<< gridX, DefaultNbThreadsPerBlock, 0, stream >>>(
             /* entrée */  ptr1,               
             /* sortie */ ptr2,            
             /* run_size */
