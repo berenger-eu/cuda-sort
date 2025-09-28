@@ -1447,6 +1447,7 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
 
 template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito, int MinNbParts = 32, int MaxNbParts = 1024>
 __host__ void SortOne(T* dataToSort, const int nbValuesToSort, cudaStream_t stream = 0, T* dataBuffer = nullptr){
+    Sort<T, TestIfSorted, FullSM, ASyncCpyBito, MinNbParts, MaxNbParts>(dataToSort, nbValuesToSort, stream, dataBuffer); return; // TODO
     if(nbValuesToSort <= 32){
         Sort_1Warp_SM_le32<T, TestIfSorted, FullSM><<<1,32,0,stream>>>(dataToSort, nbValuesToSort);
         return;
@@ -1513,6 +1514,7 @@ __host__ void SortOne(T* dataToSort, const int nbValuesToSort, cudaStream_t stre
     }
 
     // We need counterPartsHost and that sortPartitions is over
+    CUDA_CHECK(cudaFreeAsync(counterParts, stream));  
     CUDA_CHECK(cudaStreamSynchronize(stream));  
 
     for(int idxPart = 0 ; idxPart < NbParts ; idxPart++){
@@ -1539,8 +1541,7 @@ __host__ void SortOne(T* dataToSort, const int nbValuesToSort, cudaStream_t stre
     for(int idxPart = 0 ; idxPart < NbParts ; idxPart++){
         CUDA_CHECK(cudaStreamSynchronize(asyncSorts[idxPart]));
         CUDA_CHECK(cudaStreamDestroy(asyncSorts[idxPart]));
-    }
-    CUDA_CHECK(cudaFreeAsync(counterParts, stream));   
+    } 
 
     if(allocatedDataBuffer){
         CUDA_CHECK(cudaFreeAsync(dataBuffer, stream));
