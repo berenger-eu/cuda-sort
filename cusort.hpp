@@ -1447,7 +1447,6 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
 
 template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito, int MinNbParts = 32, int MaxNbParts = 1024>
 __host__ void SortOne(T* dataToSort, const int nbValuesToSort, cudaStream_t stream = 0, T* dataBuffer = nullptr){
-    Sort<T, TestIfSorted, FullSM, ASyncCpyBito, MinNbParts, MaxNbParts>(dataToSort, nbValuesToSort, stream, dataBuffer); return; // TODO
     if(nbValuesToSort <= 32){
         Sort_1Warp_SM_le32<T, TestIfSorted, FullSM><<<1,32,0,stream>>>(dataToSort, nbValuesToSort);
         return;
@@ -1502,9 +1501,6 @@ __host__ void SortOne(T* dataToSort, const int nbValuesToSort, cudaStream_t stre
     CUDA_CHECK(cudaMemcpyAsync(dataToSort, dataBuffer, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice, stream));
     CUDA_CHECK(cudaFreeAsync(pivots, stream));
 
-        // TODO
-    SortPartitions<T, TestIfSorted, FullSM, ASyncCpyBito><<< NbParts, MaxThreadsPerBlock, DefaultMaxBitoSort*2*sizeof(T),stream>>>(dataToSort, nbValuesToSort, counterParts, NbParts);
-
     int counterPartsHost[NbParts+1];
     CUDA_CHECK(cudaMemcpyAsync(counterPartsHost, counterParts, (NbParts + 1) * sizeof(int), cudaMemcpyDeviceToHost, stream));
 
@@ -1525,17 +1521,17 @@ __host__ void SortOne(T* dataToSort, const int nbValuesToSort, cudaStream_t stre
                 && (idxPart == NbParts-1 || getNextVal(pivotsHost[idxPart]) < pivotsHost[idxPart+1])){
             SortOne<T, TestIfSorted, FullSM, ASyncCpyBito, MinNbParts, MaxNbParts>(dataToSort+start, size, asyncSorts[idxPart], dataBuffer+start);
         }
-        // else if(size <= DefaultMaxBitoSort && size > 0){
-        //     const int NOrPow2Part = GreaterPowerOf2EqualOrLarger(size);
-        //     SortOnePartition<T, TestIfSorted, FullSM, ASyncCpyBito><<< 1, MaxThreadsPerBlock, NOrPow2Part*2*sizeof(T), asyncSorts[idxPart]>>>(dataToSort+start, size);
-        //     // const int nbThreadsPart = std::min(NOrPow2Part, MaxThreadsPerBlock);
-        //     // if constexpr(ASyncCpyBito){
-        //     //     Sort_1Block_async_gt32_extsm_v3<T, TestIfSorted, FullSM><<<1,nbThreadsPart,2*NOrPow2Part*sizeof(T),stream>>>(dataToSort+start, size, NOrPow2Part);
-        //     // }
-        //     // else{
-        //     //     Sort_1Block_gt32_extsm_v3<T, TestIfSorted, FullSM><<<1,nbThreadsPart,2*NOrPow2Part*sizeof(T),stream>>>(dataToSort+start, size, NOrPow2Part);
-        //     // }
-        // }
+        else if(size <= DefaultMaxBitoSort && size > 0){
+            const int NOrPow2Part = GreaterPowerOf2EqualOrLarger(size);
+            SortOnePartition<T, TestIfSorted, FullSM, ASyncCpyBito><<< 1, MaxThreadsPerBlock, NOrPow2Part*2*sizeof(T), asyncSorts[idxPart]>>>(dataToSort+start, size);
+            // const int nbThreadsPart = std::min(NOrPow2Part, MaxThreadsPerBlock);
+            // if constexpr(ASyncCpyBito){
+            //     Sort_1Block_async_gt32_extsm_v3<T, TestIfSorted, FullSM><<<1,nbThreadsPart,2*NOrPow2Part*sizeof(T),stream>>>(dataToSort+start, size, NOrPow2Part);
+            // }
+            // else{
+            //     Sort_1Block_gt32_extsm_v3<T, TestIfSorted, FullSM><<<1,nbThreadsPart,2*NOrPow2Part*sizeof(T),stream>>>(dataToSort+start, size, NOrPow2Part);
+            // }
+        }
     }
 
     for(int idxPart = 0 ; idxPart < NbParts ; idxPart++){
