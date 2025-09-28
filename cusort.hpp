@@ -1368,6 +1368,7 @@ __global__ void SortOnePartitions(T* dataToSort, const int nbValuesToSort, const
     const int start = counterParts[idxPart];
     const int end = counterParts[idxPart+1];
     const int size = end-start;
+    assert(size <= DefaultMaxBitoSort);
     if(size <= 32){
         Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(dataToSort+start, size);
         __syncthreads();
