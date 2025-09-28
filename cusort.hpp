@@ -1523,7 +1523,15 @@ __host__ void SortOne(T* dataToSort, const int nbValuesToSort, cudaStream_t stre
         }
         else if(size <= DefaultMaxBitoSort && size > 0){
             const int NOrPow2Part = GreaterPowerOf2EqualOrLarger(size);
-            SortOnePartition<T, TestIfSorted, FullSM, ASyncCpyBito><<< 1, MaxThreadsPerBlock, NOrPow2Part*2*sizeof(T), asyncSorts[idxPart]>>>(dataToSort+start, size);
+            // TODO ? SortOnePartition<T, TestIfSorted, FullSM, ASyncCpyBito><<< 1, MaxThreadsPerBlock, NOrPow2Part*2*sizeof(T), asyncSorts[idxPart]>>>(dataToSort+start, size);
+
+            const int nbThreadsPart = std::min(NOrPow2Part, MaxThreadsPerBlock);
+            if constexpr(ASyncCpyBito){
+                Sort_1Block_async_gt32_extsm_v3<T, TestIfSorted, FullSM><<<1,nbThreadsPart,2*NOrPow2Part*sizeof(T),stream>>>(dataToSort+start, size, NOrPow2Part);
+            }
+            else{
+                Sort_1Block_gt32_extsm_v3<T, TestIfSorted, FullSM><<<1,nbThreadsPart,2*NOrPow2Part*sizeof(T),stream>>>(dataToSort+start, size, NOrPow2Part);
+            }
         }
     }
 
