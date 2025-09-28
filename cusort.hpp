@@ -1523,7 +1523,7 @@ __host__ void SortOne(T* dataToSort, const int nbValuesToSort, cudaStream_t stre
         }
         else{
             const int NOrPow2Part = GreaterPowerOf2EqualOrLarger(size);
-            SortOnePartition<T, TestIfSorted, FullSM, ASyncCpyBito><<< 1, MaxThreadsPerBlock, NOrPow2Part*2*sizeof(T), asyncSorts[idxPart]>>>(dataToSort+start, size);
+            SortOnePartition<T, TestIfSorted, FullSM, ASyncCpyBito><<< 1, MaxThreadsPerBlock, /*NOrPow2Part*/DefaultMaxBitoSort*2*sizeof(T), asyncSorts[idxPart]>>>(dataToSort+start, size);
         }
     }
 
