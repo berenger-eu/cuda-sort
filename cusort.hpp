@@ -1556,6 +1556,7 @@ __host__ void SortOne(T* dataToSort, const int nbValuesToSort, cudaStream_t stre
     }
 
     for(int idxPart = 0 ; idxPart < NbParts ; idxPart++){
+        CUDA_CHECK(cudaStreamSynchronize(asyncSorts[idxPart]));
         CUDA_CHECK(cudaStreamDestroy(asyncSorts[idxPart]));
     }
     CUDA_CHECK(cudaFreeAsync(counterParts, stream));   
