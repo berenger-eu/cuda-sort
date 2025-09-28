@@ -1539,8 +1539,7 @@ __host__ void SortOne(T* dataToSort, const int nbValuesToSort, cudaStream_t stre
     }
 
     // We need counterPartsHost and that sortPartitions is over
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    CUDA_CHECK(cudaFreeAsync(counterParts, stream));    
+    CUDA_CHECK(cudaStreamSynchronize(stream));  
 
     for(int idxPart = 0 ; idxPart < NbParts ; idxPart++){
         const int start = counterPartsHost[idxPart];
