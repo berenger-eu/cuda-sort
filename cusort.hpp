@@ -1206,17 +1206,17 @@ template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito>
 __global__ void SortOnePartition(T* dataToSort, const int size){
     assert(size <= DefaultMaxBitoSort);
     if(size <= 32){
-        Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(dataToSort+start, size);
+        Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(dataToSort, size);
         __syncthreads();
     }
     else if(size <= DefaultMaxBitoSort){
         const int NOrPow2 = GreaterPowerOf2EqualOrLarger(size);
         assert(NOrPow2 <= DefaultMaxBitoSort);
         if constexpr(ASyncCpyBito){
-            Sort_1Block_async_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort+start, size, NOrPow2);
+            Sort_1Block_async_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort, size, NOrPow2);
         }
         else{
-            Sort_1Block_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort+start, size, NOrPow2);
+            Sort_1Block_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort, size, NOrPow2);
         }
     }
 }
