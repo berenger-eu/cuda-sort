@@ -143,6 +143,8 @@ inline __host__ T getPrevVal(const T& val){
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
 
+// This function tests if values are sorted in a warp
+// each thread holding one value to test
 template <typename T>
 __device__ __forceinline__ bool TestIfSorted_1Warp(const T& dataToSort) {
     // Get the active thread mask and the current lane ID.
@@ -1304,7 +1306,7 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
 }
 
 template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito, int MinNbParts = 32, int MaxNbParts = 1024>
-__host__ void SortOne(T* dataToSort, const int nbValuesToSort, cudaStream_t stream = 0, T* dataBuffer = nullptr){
+__host__ void SortOnePar(T* dataToSort, const int nbValuesToSort, cudaStream_t stream = 0, T* dataBuffer = nullptr){
     if(nbValuesToSort <= 32){
         Sort_1Warp_SM_le32<T, TestIfSorted, FullSM><<<1,32,0,stream>>>(dataToSort, nbValuesToSort);
         return;
@@ -1377,10 +1379,12 @@ __host__ void SortOne(T* dataToSort, const int nbValuesToSort, cudaStream_t stre
         const int size = end-start;
         if(size > DefaultMaxBitoSort
                 && (idxPart == NbParts-1 || getNextVal(pivotsHost[idxPart]) < pivotsHost[idxPart+1])){
-            SortOne<T, TestIfSorted, FullSM, ASyncCpyBito, MinNbParts, MaxNbParts>(dataToSort+start, size, asyncSorts[idxPart], dataBuffer+start);
+            #pragma omp task firstprivate(idxPart, start, size)
+            SortOnePar<T, TestIfSorted, FullSM, ASyncCpyBito, MinNbParts, MaxNbParts>(dataToSort+start, size, asyncSorts[idxPart], dataBuffer+start);
         }
         else if(size <= DefaultMaxBitoSort && size > 0){
             const int NOrPow2Part = GreaterPowerOf2EqualOrLarger(size);
+            #pragma omp task firstprivate(idxPart, start, size)
             SortOnePartition<T, TestIfSorted, FullSM, ASyncCpyBito><<< 1, MaxThreadsPerBlock, NOrPow2Part*2*sizeof(T), asyncSorts[idxPart]>>>(dataToSort+start, size);
             // const int nbThreadsPart = std::min(NOrPow2Part, MaxThreadsPerBlock);
             // if constexpr(ASyncCpyBito){
@@ -1392,6 +1396,8 @@ __host__ void SortOne(T* dataToSort, const int nbValuesToSort, cudaStream_t stre
         }
     }
 
+    #pragma omp taskwait
+
     for(int idxPart = 0 ; idxPart < NbParts ; idxPart++){
         CUDA_CHECK(cudaStreamSynchronize(asyncSorts[idxPart]));
         CUDA_CHECK(cudaStreamDestroy(asyncSorts[idxPart]));
@@ -1402,6 +1408,15 @@ __host__ void SortOne(T* dataToSort, const int nbValuesToSort, cudaStream_t stre
     }
 }
 
+
+template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito, int MinNbParts = 32, int MaxNbParts = 1024>
+__host__ void SortOne(T* dataToSort, const int nbValuesToSort, cudaStream_t stream = 0, T* dataBuffer = nullptr){
+    #pragma omp parallel
+    #pragma om master
+    {
+        SortOnePar<T, TestIfSorted, FullSM, ASyncCpyBito, MinNbParts, MaxNbParts>(dataToSort, nbValuesToSort, stream, dataBuffer);
+    }
+}
 
 /////////////////////////////////////////////////////////////////////////////
 
