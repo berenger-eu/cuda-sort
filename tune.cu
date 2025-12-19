@@ -73,7 +73,7 @@ void benmarkSortLarge(const std::string& inBasename){
                         for(int idxLoop = 0 ; idxLoop < NbLoops ; ++idxLoop){
                             for_int_pow2<16, 128>([&](auto MinNbParts)
                             {
-                                for_int_pow2<MinNbParts.value, 1024>([&](auto MaxNbParts)
+                                for_int_pow2<MinNbParts.value*2, 1024>([&](auto MaxNbParts)
                                 {
                                     std::cout << "idxInitData: " << idxInitData << " idxSize: " << idxSize << " idxLoop: " << idxLoop
                                             << " MinNbParts" << MinNbParts.value << " MaxNbParts" << MaxNbParts.value << std::endl;
@@ -152,7 +152,7 @@ void benmarkSortLargeOne(const std::string& inBasename){
                         for(int idxLoop = 0 ; idxLoop < NbLoops ; ++idxLoop){
                             for_int_pow2<32, 1024>([&](auto MinNbParts)
                             {
-                                for_int_pow2<MinNbParts.value, 1024>([&](auto MaxNbParts)
+                                for_int_pow2<MinNbParts.value*2, 1024>([&](auto MaxNbParts)
                             {
                                 std::cout << "idxInitData: " << idxInitData << " idxSize: " << idxSize << " idxLoop: " << idxLoop <<
                                            " MinNbParts: " << MinNbParts.value << " MaxNbParts: " << MaxNbParts.value << std::endl;
