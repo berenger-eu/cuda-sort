@@ -324,6 +324,7 @@ __device__ __forceinline__ void Core_Sort_1Warp_SM_le32_d(T* dataToSort, const i
 template <typename T, bool TestIfSorted, bool FullSM>
 __device__ void Sort_1Warp_SM_le32_d(T* dataToSort, const int nbValuesToSort){
     assert(nbValuesToSort <= 32);
+    assert(32 <= blockDim.x);
     __shared__ T shared[32];
     // Copy
     if(threadIdx.x < nbValuesToSort){
@@ -1137,6 +1138,7 @@ __global__ void Sort_core_buildPivots(T* dataToSort, const int nbValuesToSort, T
     assert(gridDim.x == 1);
     assert(nbParts <= MaxParts);
     assert(4 <= nbParts);
+    assert(32 <= blockDim.x);
     static_assert(((MaxParts - 1) & MaxParts) == 0, "MaxParts must be a power of 2");
     __shared__ T localPivots[MaxParts];
 
@@ -1258,7 +1260,8 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
     CUDA_CHECK(cudaMallocAsync(&pivots, NbParts * sizeof(int), stream));
     CUDA_CHECK(cudaMemsetAsync(pivots, 0, NbParts * sizeof(int), stream));
 
-    Sort_core_buildPivots<T, MaxNbParts><<<1, NbPartsPow2, 0, stream>>>(dataToSort, nbValuesToSort, pivots, NbParts);
+    const int NbPartsPow2Or32 = std::max(32, NbPartsPow2);
+    Sort_core_buildPivots<T, MaxNbParts><<<1, NbPartsPow2Or32, 0, stream>>>(dataToSort, nbValuesToSort, pivots, NbParts);
 
     int* counterParts = nullptr;
     CUDA_CHECK(cudaMallocAsync(&counterParts, (NbParts+2) * sizeof(int), stream));
