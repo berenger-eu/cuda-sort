@@ -502,6 +502,7 @@ void testLargeOne() {
     const int MaxSize = (1 << 20);
     std::cout << "Max size: " << MaxSize << std::endl;
 
+    ThreadPool pool;
     CuRandManager<int> randManager;
 
     for(int idxSize = 32 ; idxSize < MaxSize ; idxSize *= 2){
@@ -523,7 +524,7 @@ void testLargeOne() {
             CUDA_CHECK(cudaMemcpy(h_sorted.data(), d_array, N * sizeof(int), cudaMemcpyDeviceToHost));
             std::sort(h_sorted.begin(), h_sorted.end());
 
-            SortOne<int, TestIfSorted, FullSM, ASyncCpyBito>(d_array, N);
+            SortOne<int, TestIfSorted, FullSM, ASyncCpyBito>(pool, d_array, N);
 
             // Wait for GPU to finish before accessing on host
             CUDA_CHECK(cudaDeviceSynchronize());

@@ -493,6 +493,8 @@ void benmarkSortLargeOne(const std::string& inBasename){
     const int nbElements = std::min(268435456UL, (freeMem / sizeof(int) / 3));
     std::cout << "nbElements: " << nbElements << std::endl;
 
+    ThreadPool pool;
+
     for_bool([&](auto bool_constant_testsorted) {
         constexpr bool TestSorted = bool_constant_testsorted.value;
         for_bool([&](auto bool_constant_fullsm) {
@@ -518,7 +520,7 @@ void benmarkSortLargeOne(const std::string& inBasename){
                                 CUDA_CHECK(cudaDeviceSynchronize());
                                 SpTimer timer;
 
-                                SortOne<int, TestSorted, FullSM, AsynCpy>(d_array, idxSize);
+                                SortOne<int, TestSorted, FullSM, AsynCpy>(pool, d_array, idxSize);
 
                                 CUDA_CHECK(cudaDeviceSynchronize());
                                 timer.stop();
