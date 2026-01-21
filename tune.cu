@@ -59,7 +59,7 @@ void benmarkSortLarge(const std::string& inBasename){
     std::cout << "Free memory: " << freeMem << std::endl;
     std::cout << "Total memory: " << totalMem << std::endl;
 
-    const int nbElements = std::min(268435456UL, (freeMem / sizeof(int) / 3));
+    const int nbElements = 32768;//std::min(268435456UL, (freeMem / sizeof(int) / 3));
     std::cout << "nbElements: " << nbElements << std::endl;
 
     for_bool([&](auto bool_constant_testsorted) {
@@ -73,7 +73,7 @@ void benmarkSortLarge(const std::string& inBasename){
                         for(int idxLoop = 0 ; idxLoop < NbLoops ; ++idxLoop){
                             for_int_pow2<16, 128>([&](auto MinNbParts)
                             {
-                                for_int_pow2<MinNbParts.value*2, 1024>([&](auto MaxNbParts)
+                                for_int_pow2<MinNbParts.value*2, 1024+1>([&](auto MaxNbParts)
                                 {
                                     std::cout << "idxInitData: " << idxInitData << " idxSize: " << idxSize << " idxLoop: " << idxLoop
                                             << " MinNbParts" << MinNbParts.value << " MaxNbParts" << MaxNbParts.value << std::endl;
@@ -106,7 +106,7 @@ void benmarkSortLarge(const std::string& inBasename){
                                             << InitDataString(idxInitData) << "," 
                                             << idxSize << "," 
                                             << timer.getElapsed() << ","
-                                            << timer.getElapsed()/(idxSize * std::log2(idxSize))
+                                            << timer.getElapsed()/(idxSize * std::log2(idxSize)) << ","
                                             << MinNbParts.value << ","
                                             << MaxNbParts.value
                                             << std::endl;
@@ -138,7 +138,7 @@ void benmarkSortLargeOne(const std::string& inBasename){
     std::cout << "Free memory: " << freeMem << std::endl;
     std::cout << "Total memory: " << totalMem << std::endl;
 
-    const int nbElements = std::min(268435456UL, (freeMem / sizeof(int) / 3));
+    const int nbElements = 32768;//std::min(268435456UL, (freeMem / sizeof(int) / 3));
     std::cout << "nbElements: " << nbElements << std::endl;
 
     ThreadPool pool(1);
@@ -152,9 +152,9 @@ void benmarkSortLargeOne(const std::string& inBasename){
                 for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
                     for(int idxSize = nbElements ; idxSize <= nbElements ; idxSize *= 2){
                         for(int idxLoop = 0 ; idxLoop < NbLoops ; ++idxLoop){
-                            for_int_pow2<32, 1024>([&](auto MinNbParts)
+                            for_int_pow2<32, 1024+1>([&](auto MinNbParts)
                             {
-                                for_int_pow2<MinNbParts.value*2, 1024>([&](auto MaxNbParts)
+                                for_int_pow2<MinNbParts.value*2, 1024+1>([&](auto MaxNbParts)
                             {
                                 std::cout << "idxInitData: " << idxInitData << " idxSize: " << idxSize << " idxLoop: " << idxLoop <<
                                            " MinNbParts: " << MinNbParts.value << " MaxNbParts: " << MaxNbParts.value << std::endl;
@@ -188,7 +188,7 @@ void benmarkSortLargeOne(const std::string& inBasename){
                                         << InitDataString(idxInitData) << "," 
                                         << idxSize << "," 
                                         << timer.getElapsed() << ","
-                                        << timer.getElapsed()/(idxSize * std::log2(idxSize))
+                                        << timer.getElapsed()/(idxSize * std::log2(idxSize)) << ","
                                         << MinNbParts.value << ","
                                         << MaxNbParts.value
                                         << std::endl;
