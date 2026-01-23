@@ -1296,14 +1296,26 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
     CUDA_CHECK(cudaMemcpyAsync(dataToSort, dataBuffer, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice, stream));
     CUDA_CHECK(cudaFreeAsync(pivots, stream));
 
-    SortPartitions<T, TestIfSorted, FullSM, ASyncCpyBito><<< NbParts, MaxThreadsPerBlock, DefaultMaxBitoSort*2*sizeof(T),stream>>>(dataToSort, nbValuesToSort, counterParts, NbParts);
-
     int counterPartsHost[NbParts+1];
     CUDA_CHECK(cudaMemcpyAsync(counterPartsHost, counterParts, (NbParts + 1) * sizeof(int), cudaMemcpyDeviceToHost, stream));
 
     // We need counterPartsHost and that sortPartitions is over
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    CUDA_CHECK(cudaFreeAsync(counterParts, stream));    
+    CUDA_CHECK(cudaStreamSynchronize(stream));  
+
+    int maxSizePartToSort = 0;
+    for(int idxPart = 0 ; idxPart < NbParts ; idxPart++){
+        const int start = counterPartsHost[idxPart];
+        const int end = counterPartsHost[idxPart+1];
+        const int size = end-start;
+        if(size > maxSizePartToSort && size <= DefaultMaxBitoSort){
+            maxSizePartToSort = size;
+        }
+    }
+    const int maxSizePartToSortPow2 = GreaterPowerOf2EqualOrLarger(maxSizePartToSort);
+
+    SortPartitions<T, TestIfSorted, FullSM, ASyncCpyBito><<< NbParts, MaxThreadsPerBlock, maxSizePartToSortPow2*2*sizeof(T),stream>>>(dataToSort, nbValuesToSort, counterParts, NbParts);
+
+    CUDA_CHECK(cudaFreeAsync(counterParts, stream));  
 
     for(int idxPart = 0 ; idxPart < NbParts ; idxPart++){
         const int start = counterPartsHost[idxPart];
@@ -1343,7 +1355,7 @@ __host__ void SortOnePar(ThreadPool& pool, T* dataToSort, const int nbValuesToSo
         }
         return;
     }
-    
+
     if(NOrPow2 <= DefaultMaxBitoSort){
         const int nbThreads = std::min(NOrPow2, MaxThreadsPerBlock);
         if constexpr(ASyncCpyBito){
