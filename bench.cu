@@ -709,7 +709,7 @@ void benchmarkAll(){
     benmark512_v2(filename);
     benmark512_v3(filename);
     benmarkSortLarge(filename);
-    benmarkSortLargeOne(filename);
+    // Too slowbenmarkSortLargeOne(filename);
     benmarkSortLargeMerge(filename);
     benmarkThrust(filename);
 }

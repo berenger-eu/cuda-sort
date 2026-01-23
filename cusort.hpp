@@ -20,6 +20,7 @@
 ///////////////////////////////////////////////////////////////////////////
 
 constexpr const int DefaultNbThreadsPerBlock = 512;
+constexpr const int DefaultMaxBitoSortV2 = DefaultNbThreadsPerBlock;
 constexpr const int DefaultMaxBitoSort = 4096;
 
 void CUDA_CHECK(cudaError_t err) {
@@ -1237,6 +1238,17 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
     int MaxThreadsPerBlock = DefaultNbThreadsPerBlock;
     // TODO CUDA_CHECK(cudaDeviceGetAttribute(&MaxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, 0));
     const int NOrPow2 = GreaterPowerOf2EqualOrLarger(nbValuesToSort);
+    if(NOrPow2 <= DefaultMaxBitoSortV2){
+        const int nbThreads = std::min(NOrPow2, MaxThreadsPerBlock);
+        if constexpr(ASyncCpyBito){
+            Sort_1Block_async_gt32_extsm_v2<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort);
+        }
+        else{
+            Sort_1Block_gt32_extsm_v2<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort);
+        }
+        return;
+    }
+
     if(NOrPow2 <= DefaultMaxBitoSort){
         const int nbThreads = std::min(NOrPow2, MaxThreadsPerBlock);
         if constexpr(ASyncCpyBito){
@@ -1321,6 +1333,17 @@ __host__ void SortOnePar(ThreadPool& pool, T* dataToSort, const int nbValuesToSo
     int MaxThreadsPerBlock = DefaultNbThreadsPerBlock;
     // TODO CUDA_CHECK(cudaDeviceGetAttribute(&MaxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, 0));
     const int NOrPow2 = GreaterPowerOf2EqualOrLarger(nbValuesToSort);
+    if(NOrPow2 <= DefaultMaxBitoSortV2){
+        const int nbThreads = std::min(NOrPow2, MaxThreadsPerBlock);
+        if constexpr(ASyncCpyBito){
+            Sort_1Block_async_gt32_extsm_v2<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort);
+        }
+        else{
+            Sort_1Block_gt32_extsm_v2<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort);
+        }
+        return;
+    }
+    
     if(NOrPow2 <= DefaultMaxBitoSort){
         const int nbThreads = std::min(NOrPow2, MaxThreadsPerBlock);
         if constexpr(ASyncCpyBito){

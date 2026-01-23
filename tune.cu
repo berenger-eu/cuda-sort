@@ -218,7 +218,7 @@ void tuneAll(){
     const std::string datetime = GetDateTime();
     const std::string filename = "tune_sort_" + datetime;
     benmarkSortLarge(filename);
-    benmarkSortLargeOne(filename);
+    // Too slow benmarkSortLargeOne(filename);
 }
 ////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////
