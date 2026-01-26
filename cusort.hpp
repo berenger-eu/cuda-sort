@@ -1608,6 +1608,11 @@ __global__ void SortChunks(T* dataToSort, const int nbValuesToSort){
         if(size <= 32){
             Sort_1Warp_SM_le32_d<T, false, false>(dataToSort+start, size);
         }
+        else if(size <= DefaultMaxBitoSortV2){
+            const int NOrPow2 = GreaterPowerOf2EqualOrLarger(size);
+            assert(NOrPow2 <= DefaultMaxBitoSortV2);
+            Sort_1Block_gt32_d_extsm_v2<T, false, false>(dataToSort+start, size);
+        }
         else if(size <= MaxValuesToSort){
             const int NOrPow2 = GreaterPowerOf2EqualOrLarger(size);
             assert(NOrPow2 <= MaxValuesToSort);
@@ -1616,7 +1621,7 @@ __global__ void SortChunks(T* dataToSort, const int nbValuesToSort){
     }
 }
 
-template <typename T>
+template <typename T, int MaxValuesToSort = 1024>
 __host__ void SortMerge(T* dataToSort, const int nbValuesToSort, cudaStream_t stream = 0){
     constexpr bool TestIfSorted = false;
     constexpr bool FullSM = false;
@@ -1636,7 +1641,6 @@ __host__ void SortMerge(T* dataToSort, const int nbValuesToSort, cudaStream_t st
     }
 
     // Sort chunks
-    const int MaxValuesToSort = 1024;
     const int NbBlocks = (nbValuesToSort + MaxValuesToSort - 1) / MaxValuesToSort;
     SortChunks<T, MaxValuesToSort><<<NbBlocks, DefaultNbThreadsPerBlock, MaxValuesToSort*2*sizeof(T), stream>>>(dataToSort, nbValuesToSort);
 
