@@ -59,7 +59,7 @@ void benmarkSortLarge(const std::string& inBasename){
     std::cout << "Free memory: " << freeMem << std::endl;
     std::cout << "Total memory: " << totalMem << std::endl;
 
-    const int nbElements = 32768;//std::min(268435456UL, (freeMem / sizeof(int) / 3));
+    const int nbElements = std::min(268435456UL, (freeMem / sizeof(int) / 3));
     std::cout << "nbElements: " << nbElements << std::endl;
 
     for_bool([&](auto bool_constant_testsorted) {
@@ -138,7 +138,7 @@ void benmarkSortLargeOne(const std::string& inBasename){
     std::cout << "Free memory: " << freeMem << std::endl;
     std::cout << "Total memory: " << totalMem << std::endl;
 
-    const int nbElements = 32768;//std::min(268435456UL, (freeMem / sizeof(int) / 3));
+    const int nbElements = std::min(268435456UL, (freeMem / sizeof(int) / 3));
     std::cout << "nbElements: " << nbElements << std::endl;
 
     ThreadPool pool(1);
@@ -203,6 +203,80 @@ void benmarkSortLargeOne(const std::string& inBasename){
 }
 
 
+void benmarkSortLargeMerge(const std::string& inBasename){
+    std::ofstream filecsv(inBasename + "_largemerge.csv");
+    if(!filecsv.is_open()){
+        std::cerr << "Cannot open file" << std::endl;
+        return;
+    }
+
+    CuRandManager<int> randManager;
+
+    filecsv << "#testsorted,fullsm,asynccpy,datainit,size,BucketSize,time,timelogn" << std::endl;
+
+    // Get amount of free global memory
+    size_t freeMem, totalMem;
+    CUDA_CHECK(cudaMemGetInfo(&freeMem, &totalMem));
+    std::cout << "Free memory: " << freeMem << std::endl;
+    std::cout << "Total memory: " << totalMem << std::endl;
+
+    const int nbElements = std::min(268435456UL, (freeMem / sizeof(int) / 3));
+    std::cout << "nbElements: " << nbElements << std::endl;
+
+    for_bool([&](auto bool_constant_testsorted) {
+        constexpr bool TestSorted = bool_constant_testsorted.value;
+        for_bool([&](auto bool_constant_fullsm) {
+            constexpr bool FullSM = bool_constant_fullsm.value;
+            for_bool([&](auto bool_constant_asynccpy) {
+                constexpr bool AsynCpy = bool_constant_asynccpy.value;
+                for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
+                    for(int idxSize = nbElements ; idxSize <= nbElements ; idxSize *= 2){
+                        for(int idxLoop = 0 ; idxLoop < NbLoops ; ++idxLoop){
+                            for_int_pow2<512, 4096+1>([&](auto BucketSize){
+                                std::cout << "idxInitData: " << idxInitData << " idxSize: " << idxSize << " idxLoop: " << idxLoop << std::endl;
+
+
+                                // Allocate device memory for the array
+                                int* d_array = nullptr;
+                                CUDA_CHECK(cudaMalloc(&d_array, idxSize * sizeof(int)));
+
+                                SpTimer initTimer;
+                                randManager.initArray(d_array, idxSize, idxSize, idxInitData);
+                                initTimer.stop();
+                                std::cout << "Init time: " << initTimer.getElapsed() << "s" << std::endl;
+                                
+                                CUDA_CHECK(cudaDeviceSynchronize());
+                                SpTimer timer;
+
+                                SortMerge<int, BucketSize.value>(d_array, idxSize);
+
+                                CUDA_CHECK(cudaDeviceSynchronize());
+                                timer.stop();
+
+                                std::cout << "Time: " << timer.getElapsed() << "s" << std::endl;
+
+                                // Free device memory
+                                CUDA_CHECK(cudaFree(d_array));
+
+                                filecsv << (TestSorted?"TRUE":"FALSE") << "," 
+                                        << (FullSM?"TRUE":"FALSE") << "," 
+                                        << (AsynCpy?"TRUE":"FALSE") << "," 
+                                        << InitDataString(idxInitData) << "," 
+                                        << idxSize << "," 
+                                        << BucketSize.value << ","
+                                        << timer.getElapsed() << ","
+                                        << timer.getElapsed()/(idxSize * std::log2(idxSize))
+                                        << std::endl;
+                            });
+                        }
+                    }
+                }
+            });
+        });
+    });
+}
+
+
 #include <ctime>
 
 std::string GetDateTime(){
@@ -217,8 +291,9 @@ std::string GetDateTime(){
 void tuneAll(){
     const std::string datetime = GetDateTime();
     const std::string filename = "tune_sort_" + datetime;
-    benmarkSortLarge(filename);
+    //benmarkSortLarge(filename);
     // Too slow benmarkSortLargeOne(filename);
+    benmarkSortLargeMerge(filename);
 }
 ////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////
