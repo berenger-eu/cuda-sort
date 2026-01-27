@@ -593,7 +593,7 @@ void benmarkSortLargeMerge(const std::string& inBasename){
                                 CUDA_CHECK(cudaDeviceSynchronize());
                                 SpTimer timer;
 
-                                SortMerge<int>(d_array, idxSize);
+                                SortMerge<int, 2048>(d_array, idxSize);
 
                                 CUDA_CHECK(cudaDeviceSynchronize());
                                 timer.stop();
