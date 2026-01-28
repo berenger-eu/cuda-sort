@@ -553,8 +553,8 @@ __global__ void Sort_1Block_async_gt32_extsm(T* dataToSort, const int nbValuesTo
 ////////////////////////////////////////////////////////////////////////
 
 template <typename T, bool TestIfSorted, bool FullSM>
-__device__ __forceinline__ T* Core_Sort_1Block_SM_gt32_d_v2(T* dataToSort, const int nbValuesToSort,
-                                                            T* buffer){
+__device__ __forceinline__ T* Core_Sort_1Block_SM_gt32_d_v2(T* __restrict__ dataToSort, const int nbValuesToSort,
+                                                            T* __restrict__ buffer){
     if constexpr(FullSM == false){
         assert(blockDim.x%32 == 0);
     }
@@ -756,8 +756,8 @@ __global__ void Sort_1Block_async_gt32_extsm_v2(T* dataToSort, const int nbValue
 ////////////////////////////////////////////////////////////////////
 
 template <typename T, bool TestIfSorted, bool FullSM>
-__device__ __forceinline__ T* Core_Sort_1Block_SM_gt32_d_v3(T* dataToSort, const int nbValuesToSort,
-                                                            T* buffer, const int nbWorkingValues){
+__device__ __forceinline__ T* Core_Sort_1Block_SM_gt32_d_v3(T* __restrict__ dataToSort, const int nbValuesToSort,
+                                                            T* __restrict__ buffer, const int nbWorkingValues){
     if constexpr(FullSM == false){
         assert(blockDim.x%32 == 0);
     }
@@ -997,8 +997,8 @@ __forceinline__ __device__ int binarySearch(const T pivots[], const int nbPivots
 
 
 template <typename T, int MaxParts>
-__device__ void CountParts_Grid_core(const T* data, const int size, const T* pivots, int* counters,
-                                                   int* localCounters, const int nbParts){
+__device__ void CountParts_Grid_core(const T* __restrict__ data, const int size, const T* __restrict__ pivots, int* __restrict__ counters,
+                                                   int* __restrict__ localCounters, const int nbParts){
     assert(nbParts <= MaxParts);
     __shared__ T localPivots[MaxParts];
 
@@ -1034,7 +1034,7 @@ __device__ void CountParts_Grid_core(const T* data, const int size, const T* piv
 
 
 template <typename T, int MaxParts>
-__global__ void CountParts_Grid(const T* data, const int size, const T* pivots, int* counters, const int nbParts){
+__global__ void CountParts_Grid(const T* __restrict__ data, const int size, const T* __restrict__ pivots, int* __restrict__ counters, const int nbParts, int* __restrict__ bufferCountPerBlock){
     // Nb threads must be power of 2
     assert(((blockDim.x - 1) & blockDim.x) == 0);
 
@@ -1043,28 +1043,34 @@ __global__ void CountParts_Grid(const T* data, const int size, const T* pivots, 
     CountParts_Grid_core<T, MaxParts>(data, size, pivots, counters, localCounters, nbParts);
 
     for(int idx = threadIdx.x ; idx < nbParts ; idx += blockDim.x){
-        if(localCounters[idx]){
-            atomicAdd(&counters[idx], localCounters[idx]);
+        const int localCountersIdx = localCounters[idx];
+        if(localCountersIdx){
+            atomicAdd(&counters[idx], localCountersIdx);
+            bufferCountPerBlock[blockIdx.x * nbParts + idx] = localCountersIdx;
         }
     }
     __syncthreads();
 }
 
 template <typename T, int MaxParts>
-__global__ void MoveElements_Grid(T* data, const int size, const T* pivots, int* counters, T* dataBuffer, const int nbParts){
+__global__ void MoveElements_Grid(T* __restrict__ data, const int size, const T* __restrict__ pivots, int* __restrict__ counters, T* __restrict__ dataBuffer, const int nbParts, int* __restrict__ bufferCountPerBlock){
     // Nb threads must be power of 2
     assert(nbParts <= MaxParts);
     assert(((blockDim.x - 1) & blockDim.x) == 0);
     assert(blockDim.x <= DefaultNbThreadsPerBlock);
 
-    __shared__ int localCounters[MaxParts];
-    CountParts_Grid_core<T, MaxParts>(data, size, pivots, counters, localCounters, nbParts);
-    __syncthreads();
+    __shared__ T localPivots[MaxParts];
+
+    for(int idx = threadIdx.x ; idx < nbParts ; idx += blockDim.x){
+        localPivots[idx] = pivots[idx];
+    }
+    // __syncthreads();
 
     __shared__ int localGOffset[MaxParts];
     for(int idx = threadIdx.x ; idx < nbParts ; idx += blockDim.x){
-        if(localCounters[idx]){
-            localGOffset[idx] = atomicAdd(&counters[idx], localCounters[idx]);
+        const int localCountersIdx = bufferCountPerBlock[blockIdx.x * nbParts + idx];
+        if(localCountersIdx){
+            localGOffset[idx] = atomicAdd(&counters[idx], localCountersIdx);
         }
     }
     __syncthreads();
@@ -1076,7 +1082,7 @@ __global__ void MoveElements_Grid(T* data, const int size, const T* pivots, int*
         const T value = data[idxValue];
 
         // Binary search on pivots
-        const int bucket = binarySearch(pivots, nbParts, value);
+        const int bucket = binarySearch(localPivots, nbParts, value);
         assert(0 <= bucket && bucket < nbParts);
         const int insertPosition = atomicAdd(&localGOffset[bucket], 1);
         dataBuffer[insertPosition] = value;
@@ -1134,7 +1140,7 @@ __global__ void BuildPrefix_SM( NumType* prefixTree, const IndexType inSize){
 ///////////////////////////////////////////////////////////////////////////
 
 template <typename T, int MaxParts>
-__global__ void Sort_core_buildPivots(T* dataToSort, const int nbValuesToSort, T* pivots, const int nbParts){
+__global__ void Sort_core_buildPivots(T* __restrict__ dataToSort, const int nbValuesToSort, T* __restrict__ pivots, const int nbParts){
     // We copy values from the array to build the partition
     assert(gridDim.x == 1);
     assert(nbParts <= MaxParts);
@@ -1185,7 +1191,7 @@ __global__ void Sort_core_buildPivots(T* dataToSort, const int nbValuesToSort, T
 }
 
 template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito>
-__global__ void SortPartitions(T* dataToSort, const int nbValuesToSort, const int counterParts[], const int nbParts){
+__global__ void SortPartitions(T* __restrict__ dataToSort, const int nbValuesToSort, const int* __restrict__ counterParts, const int nbParts){
     for(int idxPart = blockIdx.x ; idxPart < nbParts; idxPart += gridDim.x){
         const int start = counterParts[idxPart];
         const int end = counterParts[idxPart+1];
@@ -1280,15 +1286,21 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
     CUDA_CHECK(cudaMemsetAsync(counterParts, 0, (NbParts+2) * sizeof(int), stream));
 
     const int nbThreadBlock = (nbValuesToSort+MaxThreadsPerBlock-1)/MaxThreadsPerBlock;
-    CountParts_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock, 0, stream >>>(dataToSort, nbValuesToSort, pivots, counterParts+2, NbParts);
+
+    int* bufferCountPerBlock = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&bufferCountPerBlock, MaxNbParts * nbThreadBlock * sizeof(int), stream));
+    CUDA_CHECK(cudaMemsetAsync(bufferCountPerBlock, 0, MaxNbParts * nbThreadBlock * sizeof(int), stream));
+
+    CountParts_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock, 0, stream >>>(dataToSort, nbValuesToSort, pivots, counterParts+2, NbParts, bufferCountPerBlock);
 
     BuildPrefix_SM<T, int, MaxNbParts><<<1,NbParts,0,stream>>>(counterParts+2, NbParts);
+    CUDA_CHECK(cudaFreeAsync(bufferCountPerBlock, stream));
 
 
     MoveElements_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock,0,stream >>>(dataToSort, nbValuesToSort,
                                             pivots,
                                             counterParts+1,
-                                            dataBuffer, NbParts);
+                                            dataBuffer, NbParts, bufferCountPerBlock);
 
     int pivotsHost[NbParts];
     CUDA_CHECK(cudaMemcpyAsync(pivotsHost, pivots, NbParts * sizeof(int), cudaMemcpyDeviceToHost, stream));
@@ -1386,7 +1398,11 @@ __host__ void SortOnePar(ThreadPool& pool, T* dataToSort, const int nbValuesToSo
     CUDA_CHECK(cudaMemsetAsync(counterParts, 0, (NbParts+2) * sizeof(int), stream));
 
     const int nbThreadBlock = (nbValuesToSort+MaxThreadsPerBlock-1)/MaxThreadsPerBlock;
-    CountParts_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock, 0, stream >>>(dataToSort, nbValuesToSort, pivots, counterParts+2, NbParts);
+    int* bufferCountPerBlock = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&bufferCountPerBlock, MaxNbParts * nbThreadBlock * sizeof(int), stream));
+    CUDA_CHECK(cudaMemsetAsync(bufferCountPerBlock, 0, MaxNbParts * nbThreadBlock * sizeof(int), stream));
+
+    CountParts_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock, 0, stream >>>(dataToSort, nbValuesToSort, pivots, counterParts+2, NbParts, bufferCountPerBlock);
 
     BuildPrefix_SM<T, int, MaxNbParts><<<1,NbParts,0,stream>>>(counterParts+2, NbParts);
 
@@ -1394,7 +1410,9 @@ __host__ void SortOnePar(ThreadPool& pool, T* dataToSort, const int nbValuesToSo
     MoveElements_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock,0,stream >>>(dataToSort, nbValuesToSort,
                                             pivots,
                                             counterParts+1,
-                                            dataBuffer, NbParts);
+                                            dataBuffer, NbParts, bufferCountPerBlock);
+    
+    CUDA_CHECK(cudaFreeAsync(bufferCountPerBlock, stream));
 
     int pivotsHost[NbParts];
     CUDA_CHECK(cudaMemcpyAsync(pivotsHost, pivots, NbParts * sizeof(int), cudaMemcpyDeviceToHost, stream));
