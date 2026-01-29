@@ -1034,7 +1034,7 @@ __device__ void CountParts_Grid_core(const T* __restrict__ data, const int size,
 
 
 template <typename T, int MaxParts>
-__global__ void CountParts_Grid(const T* __restrict__ data, const int size, const T* __restrict__ pivots, int* __restrict__ counters, const int nbParts, int* __restrict__ bufferCountPerBlock){
+__global__ void CountParts_Grid(const T* __restrict__ data, const int size, const T* __restrict__ pivots, int* __restrict__ counters, const int nbParts){
     // Nb threads must be power of 2
     assert(((blockDim.x - 1) & blockDim.x) == 0);
 
@@ -1046,29 +1046,26 @@ __global__ void CountParts_Grid(const T* __restrict__ data, const int size, cons
         const int localCountersIdx = localCounters[idx];
         if(localCountersIdx){
             atomicAdd(&counters[idx], localCountersIdx);
-            bufferCountPerBlock[blockIdx.x * nbParts + idx] = localCountersIdx;
         }
     }
     __syncthreads();
 }
 
 template <typename T, int MaxParts>
-__global__ void MoveElements_Grid(T* __restrict__ data, const int size, const T* __restrict__ pivots, int* __restrict__ counters, T* __restrict__ dataBuffer, const int nbParts, int* __restrict__ bufferCountPerBlock){
+__global__ void MoveElements_Grid(T* __restrict__ data, const int size, const T* __restrict__ pivots, int* __restrict__ counters, T* __restrict__ dataBuffer, const int nbParts){
     // Nb threads must be power of 2
     assert(nbParts <= MaxParts);
     assert(((blockDim.x - 1) & blockDim.x) == 0);
     assert(blockDim.x <= DefaultNbThreadsPerBlock);
 
+    __shared__ int localCounters[MaxParts];
+    CountParts_Grid_core<T, MaxParts>(data, size, pivots, counters, localCounters, nbParts);
+
     __shared__ T localPivots[MaxParts];
-
-    for(int idx = threadIdx.x ; idx < nbParts ; idx += blockDim.x){
-        localPivots[idx] = pivots[idx];
-    }
-    // __syncthreads();
-
     __shared__ int localGOffset[MaxParts];
     for(int idx = threadIdx.x ; idx < nbParts ; idx += blockDim.x){
-        const int localCountersIdx = bufferCountPerBlock[blockIdx.x * nbParts + idx];
+        localPivots[idx] = pivots[idx];
+        const int localCountersIdx = localCounters[idx];
         if(localCountersIdx){
             localGOffset[idx] = atomicAdd(&counters[idx], localCountersIdx);
         }
@@ -1077,13 +1074,17 @@ __global__ void MoveElements_Grid(T* __restrict__ data, const int size, const T*
 
     const int id = threadIdx.x + blockIdx.x * blockDim.x;
     const int numThreads = blockDim.x * gridDim.x;
+
+    int bucket = -1;
     
     for(int idxValue = id; idxValue < size; idxValue += numThreads){
         const T value = data[idxValue];
 
         // Binary search on pivots
-        const int bucket = binarySearch(localPivots, nbParts, value);
-        assert(0 <= bucket && bucket < nbParts);
+        if(bucket == -1 || !(localPivots[bucket] <= value && value < localPivots[bucket+1])){
+            bucket = binarySearch(localPivots, nbParts, value);
+            assert(0 <= bucket && bucket < nbParts);
+        }
         const int insertPosition = atomicAdd(&localGOffset[bucket], 1);
         dataBuffer[insertPosition] = value;
     }
@@ -1287,20 +1288,14 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
 
     const int nbThreadBlock = (nbValuesToSort+MaxThreadsPerBlock-1)/MaxThreadsPerBlock;
 
-    int* bufferCountPerBlock = nullptr;
-    CUDA_CHECK(cudaMallocAsync(&bufferCountPerBlock, MaxNbParts * nbThreadBlock * sizeof(int), stream));
-    CUDA_CHECK(cudaMemsetAsync(bufferCountPerBlock, 0, MaxNbParts * nbThreadBlock * sizeof(int), stream));
-
-    CountParts_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock, 0, stream >>>(dataToSort, nbValuesToSort, pivots, counterParts+2, NbParts, bufferCountPerBlock);
+    CountParts_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock, 0, stream >>>(dataToSort, nbValuesToSort, pivots, counterParts+2, NbParts);
 
     BuildPrefix_SM<T, int, MaxNbParts><<<1,NbParts,0,stream>>>(counterParts+2, NbParts);
-    CUDA_CHECK(cudaFreeAsync(bufferCountPerBlock, stream));
-
 
     MoveElements_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock,0,stream >>>(dataToSort, nbValuesToSort,
                                             pivots,
                                             counterParts+1,
-                                            dataBuffer, NbParts, bufferCountPerBlock);
+                                            dataBuffer, NbParts);
 
     int pivotsHost[NbParts];
     CUDA_CHECK(cudaMemcpyAsync(pivotsHost, pivots, NbParts * sizeof(int), cudaMemcpyDeviceToHost, stream));
@@ -1398,21 +1393,15 @@ __host__ void SortOnePar(ThreadPool& pool, T* dataToSort, const int nbValuesToSo
     CUDA_CHECK(cudaMemsetAsync(counterParts, 0, (NbParts+2) * sizeof(int), stream));
 
     const int nbThreadBlock = (nbValuesToSort+MaxThreadsPerBlock-1)/MaxThreadsPerBlock;
-    int* bufferCountPerBlock = nullptr;
-    CUDA_CHECK(cudaMallocAsync(&bufferCountPerBlock, MaxNbParts * nbThreadBlock * sizeof(int), stream));
-    CUDA_CHECK(cudaMemsetAsync(bufferCountPerBlock, 0, MaxNbParts * nbThreadBlock * sizeof(int), stream));
 
-    CountParts_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock, 0, stream >>>(dataToSort, nbValuesToSort, pivots, counterParts+2, NbParts, bufferCountPerBlock);
+    CountParts_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock, 0, stream >>>(dataToSort, nbValuesToSort, pivots, counterParts+2, NbParts);
 
     BuildPrefix_SM<T, int, MaxNbParts><<<1,NbParts,0,stream>>>(counterParts+2, NbParts);
-
 
     MoveElements_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock,0,stream >>>(dataToSort, nbValuesToSort,
                                             pivots,
                                             counterParts+1,
-                                            dataBuffer, NbParts, bufferCountPerBlock);
-    
-    CUDA_CHECK(cudaFreeAsync(bufferCountPerBlock, stream));
+                                            dataBuffer, NbParts);
 
     int pivotsHost[NbParts];
     CUDA_CHECK(cudaMemcpyAsync(pivotsHost, pivots, NbParts * sizeof(int), cudaMemcpyDeviceToHost, stream));
