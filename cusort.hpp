@@ -1330,7 +1330,7 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
         const int size = end-start;
         if(size > DefaultMaxBitoSort
                 && (idxPart == NbParts-1 || getNextVal(pivotsHost[idxPart]) < pivotsHost[idxPart+1])){
-            Sort<T, TestIfSorted, FullSM, ASyncCpyBito, MinNbParts, MaxNbParts>(dataToSort+start, size, stream, dataBuffer);
+            Sort<T, TestIfSorted, FullSM, ASyncCpyBito, MinNbParts, MaxNbParts>(dataToSort+start, size, stream, dataBuffer+start);
         }
     }
 
@@ -1703,7 +1703,85 @@ __host__ void SortMerge(
     }
 }
 
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
+template <typename T, int MaxValuesToSort = 1024, bool TestIfSorted = false, bool FullSM = false>
+__host__ void HybridSort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream = 0, T* dataBuffer = nullptr){
+    // If the array is small enough, we use SortMerge
+    if (nbValuesToSort <= MaxValuesToSort * MaxValuesToSort) {
+        SortMerge<T, MaxValuesToSort>(dataToSort, nbValuesToSort, DefaultNbThreadsPerBlock, stream);
+        return;
+    }
+
+    // Otherwise, we multipartition it and then sort each partition with merge sort
+    const int MaxNbParts = 256;
+    const int NbParts = std::min(MaxNbParts, (nbValuesToSort/DefaultMaxBitoSort)+1);
+    const int NbPartsPow2 = GreaterPowerOf2EqualOrLarger(NbParts);
+
+    const bool allocatedDataBuffer = (dataBuffer == nullptr);
+    if(allocatedDataBuffer){
+        CUDA_CHECK(cudaMallocAsync(&dataBuffer, nbValuesToSort * sizeof(T), stream));
+    }
+
+    int* pivots = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&pivots, NbParts * sizeof(int), stream));
+    CUDA_CHECK(cudaMemsetAsync(pivots, 0, NbParts * sizeof(int), stream));
+
+    const int NbPartsPow2Or32 = std::max(32, NbPartsPow2);
+    Sort_core_buildPivots<T, MaxNbParts><<<1, NbPartsPow2Or32, 0, stream>>>(dataToSort, nbValuesToSort, pivots, NbParts);
+
+    int* counterParts = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&counterParts, (NbParts+2) * sizeof(int), stream));
+    CUDA_CHECK(cudaMemsetAsync(counterParts, 0, (NbParts+2) * sizeof(int), stream));
+
+    const int MaxThreadsPerBlock = DefaultNbThreadsPerBlock;
+    const int nbThreadBlock = (nbValuesToSort+MaxThreadsPerBlock-1)/MaxThreadsPerBlock;
+
+    CountParts_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock, 0, stream >>>(dataToSort, nbValuesToSort, pivots, counterParts+2, NbParts);
+
+    BuildPrefix_SM<T, int, MaxNbParts><<<1,NbParts,0,stream>>>(counterParts+2, NbParts);
+
+    MoveElements_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock,0,stream >>>(dataToSort, nbValuesToSort,
+                                            pivots,
+                                            counterParts+1,
+                                            dataBuffer, NbParts);
+
+    int pivotsHost[NbParts];
+    CUDA_CHECK(cudaMemcpyAsync(pivotsHost, pivots, NbParts * sizeof(int), cudaMemcpyDeviceToHost, stream));
+
+    CUDA_CHECK(cudaMemcpyAsync(dataToSort, dataBuffer, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice, stream));
+    CUDA_CHECK(cudaFreeAsync(pivots, stream));
+
+    int counterPartsHost[NbParts+1];
+    CUDA_CHECK(cudaMemcpyAsync(counterPartsHost, counterParts, (NbParts + 1) * sizeof(int), cudaMemcpyDeviceToHost, stream));
+
+    // We create NbParts streams to sort each partition
+    cudaStream_t asyncSorts[NbParts];
+    for(int idxPart = 0 ; idxPart < NbParts ; idxPart++){
+        CUDA_CHECK(cudaStreamCreateWithFlags(&asyncSorts[idxPart], cudaStreamNonBlocking));
+    }
+
+    // We need counterPartsHost and that sortPartitions is over
+    CUDA_CHECK(cudaStreamSynchronize(stream));  
+    CUDA_CHECK(cudaFreeAsync(counterParts, stream));  
+
+    for(int idxPart = 0 ; idxPart < NbParts ; idxPart++){
+        const int start = counterPartsHost[idxPart];
+        const int end = counterPartsHost[idxPart+1];
+        const int size = end-start;
+        SortMerge<T, DefaultMaxBitoSort>(dataToSort+start, size, DefaultNbThreadsPerBlock, asyncSorts[idxPart], dataBuffer+start, size);
+    }
+
+    for(int idxPart = 0 ; idxPart < NbParts ; idxPart++){
+        CUDA_CHECK(cudaStreamDestroy(asyncSorts[idxPart]));
+    }
+
+    if(allocatedDataBuffer){
+        CUDA_CHECK(cudaFreeAsync(dataBuffer, stream));
+    }
+}
 
 
 #endif
