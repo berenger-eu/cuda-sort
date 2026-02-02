@@ -1470,25 +1470,6 @@ __host__ void SortOne(ThreadPool& pool, T* dataToSort, const int nbValuesToSort,
 
 /////////////////////////////////////////////////////////////////////////////
 
-
-template <typename T, int TILE>
-__device__ __forceinline__ int mergePathDiag(
-    const T* A, int aCount,
-    const T* B, int bCount,
-    int diag
-){
-    int lo = max(0, diag - bCount);
-    int hi = min(aCount, diag);
-    while (lo < hi) {
-        int mid = (lo + hi) >> 1;
-        int j   = diag - mid;
-        // même logique que toi
-        if (mid < aCount && j > 0 && A[mid] < B[j - 1]) lo = mid + 1;
-        else                                           hi = mid;
-    }
-    return lo; // iA, et jB = diag - iA
-}
-
 template <typename T>
 __device__ __forceinline__ int mergePathDiag(
     const T* A, int aCount,
@@ -1616,7 +1597,8 @@ __global__ void SortChunks(T* dataToSort, const int nbValuesToSort){
 template <typename T, int MaxValuesToSort = 1024>
 __host__ void SortMerge(
     T* dataToSort,
-    int nbValuesToSort,
+    const int nbValuesToSort,
+    const int nbThreadsPerBlockForMerge = DefaultNbThreadsPerBlock,
     cudaStream_t stream = 0,
     T* externalBuffer = nullptr,
     size_t externalBufferElems = 0
@@ -1680,7 +1662,7 @@ __host__ void SortMerge(
         const int gridX          = numMerges * blocksPerMerge;
 
         mergeKernel<T, TILE>
-            <<<gridX, DefaultNbThreadsPerBlock, 0, stream>>>(
+            <<<gridX, nbThreadsPerBlockForMerge, 0, stream>>>(
                 in, out, run_size, nbValuesToSort
             );
 
@@ -1699,7 +1681,7 @@ __host__ void SortMerge(
         const int gridX          = numMerges * blocksPerMerge;
 
         mergeKernel<T, TILE>
-            <<<gridX, DefaultNbThreadsPerBlock, 0, stream>>>(
+            <<<gridX, nbThreadsPerBlockForMerge, 0, stream>>>(
                 in, out, run_size, nbValuesToSort
             );
 

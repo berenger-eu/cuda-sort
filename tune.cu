@@ -212,7 +212,7 @@ void benmarkSortLargeMerge(const std::string& inBasename){
 
     CuRandManager<int> randManager;
 
-    filecsv << "#testsorted,fullsm,asynccpy,datainit,size,BucketSize,time,timelogn" << std::endl;
+    filecsv << "#testsorted,fullsm,asynccpy,datainit,size,BucketSize,threadBlockSize,time,timelogn" << std::endl;
 
     // Get amount of free global memory
     size_t freeMem, totalMem;
@@ -231,43 +231,46 @@ void benmarkSortLargeMerge(const std::string& inBasename){
                 constexpr bool AsynCpy = bool_constant_asynccpy.value;
                 for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
                     for(int idxSize = nbElements ; idxSize <= nbElements ; idxSize *= 2){
-                        for(int idxLoop = 0 ; idxLoop < NbLoops ; ++idxLoop){
-                            for_int_pow2<512, 4096+1>([&](auto BucketSize){
-                                std::cout << "idxInitData: " << idxInitData << " idxSize: " << idxSize << " idxLoop: " << idxLoop << std::endl;
+                        for(int nbThreadsPerBlockForMerge = 128 ; nbThreadsPerBlockForMerge <= 1024 ; nbThreadsPerBlockForMerge *=2){
+                            for(int idxLoop = 0 ; idxLoop < NbLoops ; ++idxLoop){
+                                for_int_pow2<512, 4096+1>([&](auto BucketSize){
+                                    std::cout << "idxInitData: " << idxInitData << " idxSize: " << idxSize << " idxLoop: " << idxLoop << std::endl;
 
 
-                                // Allocate device memory for the array
-                                int* d_array = nullptr;
-                                CUDA_CHECK(cudaMalloc(&d_array, idxSize * sizeof(int)));
+                                    // Allocate device memory for the array
+                                    int* d_array = nullptr;
+                                    CUDA_CHECK(cudaMalloc(&d_array, idxSize * sizeof(int)));
 
-                                SpTimer initTimer;
-                                randManager.initArray(d_array, idxSize, idxSize, idxInitData);
-                                initTimer.stop();
-                                std::cout << "Init time: " << initTimer.getElapsed() << "s" << std::endl;
-                                
-                                CUDA_CHECK(cudaDeviceSynchronize());
-                                SpTimer timer;
+                                    SpTimer initTimer;
+                                    randManager.initArray(d_array, idxSize, idxSize, idxInitData);
+                                    initTimer.stop();
+                                    std::cout << "Init time: " << initTimer.getElapsed() << "s" << std::endl;
+                                    
+                                    CUDA_CHECK(cudaDeviceSynchronize());
+                                    SpTimer timer;
 
-                                SortMerge<int, BucketSize.value>(d_array, idxSize);
+                                    SortMerge<int, BucketSize.value>(d_array, idxSize);
 
-                                CUDA_CHECK(cudaDeviceSynchronize());
-                                timer.stop();
+                                    CUDA_CHECK(cudaDeviceSynchronize());
+                                    timer.stop();
 
-                                std::cout << "Time: " << timer.getElapsed() << "s" << std::endl;
+                                    std::cout << "Time: " << timer.getElapsed() << "s" << std::endl;
 
-                                // Free device memory
-                                CUDA_CHECK(cudaFree(d_array));
+                                    // Free device memory
+                                    CUDA_CHECK(cudaFree(d_array));
 
-                                filecsv << (TestSorted?"TRUE":"FALSE") << "," 
-                                        << (FullSM?"TRUE":"FALSE") << "," 
-                                        << (AsynCpy?"TRUE":"FALSE") << "," 
-                                        << InitDataString(idxInitData) << "," 
-                                        << idxSize << "," 
-                                        << BucketSize.value << ","
-                                        << timer.getElapsed() << ","
-                                        << timer.getElapsed()/(idxSize * std::log2(idxSize))
-                                        << std::endl;
-                            });
+                                    filecsv << (TestSorted?"TRUE":"FALSE") << "," 
+                                            << (FullSM?"TRUE":"FALSE") << "," 
+                                            << (AsynCpy?"TRUE":"FALSE") << "," 
+                                            << InitDataString(idxInitData) << "," 
+                                            << idxSize << "," 
+                                            << BucketSize.value << ","
+                                            << nbThreadsPerBlockForMerge << ","
+                                            << timer.getElapsed() << ","
+                                            << timer.getElapsed()/(idxSize * std::log2(idxSize))
+                                            << std::endl;
+                                });
+                            }
                         }
                     }
                 }
