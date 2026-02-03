@@ -1603,6 +1603,9 @@ __host__ void SortMerge(
     T* externalBuffer = nullptr,
     size_t externalBufferElems = 0
 ){
+    // MaxValuesToSort must be power of 2
+    static_assert(((MaxValuesToSort - 1) & MaxValuesToSort) == 0, "MaxValuesToSort must be a power of 2");
+
     constexpr bool TestIfSorted = false;
     constexpr bool FullSM       = false;
 
@@ -1709,6 +1712,8 @@ __host__ void SortMerge(
 
 template <typename T, int MaxValuesToSort = 2048, int MaxNbParts = 512, bool TestIfSorted = false, bool FullSM = false>
 __host__ void HybridSort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream = 0, T* dataBuffer = nullptr){
+    static_assert(((MaxValuesToSort - 1) & MaxValuesToSort) == 0, "MaxValuesToSort must be a power of 2");
+
     // If the array is small enough, we use SortMerge
     if (nbValuesToSort <= MaxValuesToSort * 16) {
         SortMerge<T, MaxValuesToSort>(dataToSort, nbValuesToSort, DefaultNbThreadsPerBlock, stream);
@@ -1716,7 +1721,7 @@ __host__ void HybridSort(T* dataToSort, const int nbValuesToSort, cudaStream_t s
     }
 
     // Otherwise, we multipartition it and then sort each partition with merge sort
-    const int NbParts = std::min(MaxNbParts, (nbValuesToSort/DefaultMaxBitoSort)+1);
+    const int NbParts = std::min(MaxNbParts, (nbValuesToSort/MaxValuesToSort)+1);
     const int NbPartsPow2 = GreaterPowerOf2EqualOrLarger(NbParts);
 
     const bool allocatedDataBuffer = (dataBuffer == nullptr);
