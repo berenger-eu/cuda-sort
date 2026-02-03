@@ -603,6 +603,57 @@ void testLargeMerge() {
     }
 }
 
+void testLargeHybrid() {
+    // Limit the size to this value
+    const int MaxSize = (1 << 20);
+    std::cout << "Max size: " << MaxSize << std::endl;
+
+    CuRandManager<int> randManager;
+
+    for(int idxSize = 32 ; idxSize < MaxSize ; idxSize *= 2){
+        for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
+            // Number of elements to sort
+            const int N = idxSize;
+            const int NOrPow2 = GreaterPowerOf2EqualOrLarger(N);
+            assert(((NOrPow2-1) & NOrPow2) == 0);
+
+            std::cout << "Testing with " << N << " elements" << std::endl;
+
+            // Allocate device memory for the array
+            int* d_array = nullptr;
+            CUDA_CHECK(cudaMalloc(&d_array, N * sizeof(int)));
+
+            randManager.initArray(d_array, idxSize, idxSize, idxInitData);
+            
+            std::vector<int> h_sorted(N);
+            CUDA_CHECK(cudaMemcpy(h_sorted.data(), d_array, N * sizeof(int), cudaMemcpyDeviceToHost));
+            std::sort(h_sorted.begin(), h_sorted.end());
+
+            HybridSort<int>(d_array, N);
+
+            // Wait for GPU to finish before accessing on host
+            CUDA_CHECK(cudaDeviceSynchronize());
+
+            // Copy the (supposedly sorted) array back from device to host
+            std::vector<int> h_result(N);
+            CUDA_CHECK(cudaMemcpy(h_result.data(), d_array, N * sizeof(int), cudaMemcpyDeviceToHost));
+
+            // Free device memory
+            CUDA_CHECK(cudaFree(d_array));
+
+            // Verify that the device result matches the sorted host array
+            if (h_result != h_sorted) {
+                for(int i = 0 ; i < N ; i++){
+                    if(h_result[i] != h_sorted[i]){
+                        std::cout << i << " " << h_result[i] << " " << h_sorted[i] << std::endl;
+                    }
+                }
+                std::cout << "The array is NOT correctly sorted." << std::endl;
+                assert(0);
+            }
+        }
+    }
+}
 
 int main() {
     if(true){
@@ -647,6 +698,9 @@ int main() {
     }
     if(true){
         testLargeMerge();
+    }
+    if(true){
+        testLargeHybrid();
     }
     return 0;
 }
