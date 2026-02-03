@@ -1594,7 +1594,7 @@ __global__ void SortChunks(T* dataToSort, const int nbValuesToSort){
 }
 
 
-template <typename T, int MaxValuesToSort = 1024>
+template <typename T, int MaxValuesToSort = DefaultMaxBitoSort>
 __host__ void SortMerge(
     T* dataToSort,
     const int nbValuesToSort,
@@ -1707,16 +1707,15 @@ __host__ void SortMerge(
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
 
-template <typename T, int MaxValuesToSort = 1024, bool TestIfSorted = false, bool FullSM = false>
+template <typename T, int MaxValuesToSort = DefaultMaxBitoSort, int MaxNbParts = 256, bool TestIfSorted = false, bool FullSM = false>
 __host__ void HybridSort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream = 0, T* dataBuffer = nullptr){
     // If the array is small enough, we use SortMerge
-    if (nbValuesToSort <= MaxValuesToSort * MaxValuesToSort) {
+    if (nbValuesToSort <= MaxValuesToSort * 16) {
         SortMerge<T, MaxValuesToSort>(dataToSort, nbValuesToSort, DefaultNbThreadsPerBlock, stream);
         return;
     }
 
     // Otherwise, we multipartition it and then sort each partition with merge sort
-    const int MaxNbParts = 256;
     const int NbParts = std::min(MaxNbParts, (nbValuesToSort/DefaultMaxBitoSort)+1);
     const int NbPartsPow2 = GreaterPowerOf2EqualOrLarger(NbParts);
 
