@@ -1647,15 +1647,11 @@ __host__ void SortMerge(
         ownsBuffer = true;
     }
 
-    // 3) Passes de merge
-    constexpr int IdealMergeSize = 2048;
-
     T* in  = dataToSort;
     T* out = dataBuffer;
 
-    // Phase 1 : TILE = MaxValuesToSort
     for (int run_size = MaxValuesToSort;
-         run_size < nbValuesToSort && run_size < IdealMergeSize;
+         run_size < nbValuesToSort;
          run_size *= 2)
     {
         constexpr int TILE = MaxValuesToSort;
@@ -1672,26 +1668,6 @@ __host__ void SortMerge(
         std::swap(in, out);
     }
 
-    // Phase 2 : TILE = IdealMergeSize
-    for (int run_size = IdealMergeSize;
-         run_size < nbValuesToSort;
-         run_size *= 2)
-    {
-        constexpr int TILE = IdealMergeSize;
-
-        const int numMerges      = ceil_div(nbValuesToSort, 2 * run_size);
-        const int blocksPerMerge = ceil_div(2 * run_size, TILE);
-        const int gridX          = numMerges * blocksPerMerge;
-
-        mergeKernel<T, TILE>
-            <<<gridX, nbThreadsPerBlockForMerge, 0, stream>>>(
-                in, out, run_size, nbValuesToSort
-            );
-
-        std::swap(in, out);
-    }
-
-    // 4) Si le résultat est dans le buffer, copie finale (nécessaire, propre, correct)
     if (in != dataToSort) {
         CUDA_CHECK(cudaMemcpyAsync(
             dataToSort, in,
@@ -1762,8 +1738,9 @@ __host__ void HybridSort(T* dataToSort, const int nbValuesToSort, cudaStream_t s
     CUDA_CHECK(cudaMemcpyAsync(counterPartsHost, counterParts, (NbParts + 1) * sizeof(int), cudaMemcpyDeviceToHost, stream));
 
     // We create NbParts streams to sort each partition
-    cudaStream_t asyncSorts[NbParts];
-    for(int idxPart = 0 ; idxPart < NbParts ; idxPart++){
+    constexpr int kStreams = 8;
+    cudaStream_t asyncSorts[kStreams];
+    for(int idxPart = 0 ; idxPart < kStreams ; idxPart++){
         CUDA_CHECK(cudaStreamCreateWithFlags(&asyncSorts[idxPart], cudaStreamNonBlocking));
     }
 
@@ -1775,10 +1752,10 @@ __host__ void HybridSort(T* dataToSort, const int nbValuesToSort, cudaStream_t s
         const int start = counterPartsHost[idxPart];
         const int end = counterPartsHost[idxPart+1];
         const int size = end-start;
-        SortMerge<T, DefaultMaxBitoSort>(dataToSort+start, size, DefaultNbThreadsPerBlock, asyncSorts[idxPart], dataBuffer+start, size);
+        SortMerge<T, DefaultMaxBitoSort>(dataToSort+start, size, DefaultNbThreadsPerBlock, asyncSorts[idxPart % kStreams], dataBuffer+start, size);
     }
 
-    for(int idxPart = 0 ; idxPart < NbParts ; idxPart++){
+    for(int idxPart = 0 ; idxPart < kStreams ; idxPart++){
         CUDA_CHECK(cudaStreamDestroy(asyncSorts[idxPart]));
     }
 
