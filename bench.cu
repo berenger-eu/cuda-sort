@@ -646,7 +646,7 @@ void benmarkSortLargeHybrid(const std::string& inBasename){
         for_bool([&](auto bool_constant_fullsm) {
             constexpr bool FullSM = bool_constant_fullsm.value;
             for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
-                for(int idxSize = nbElements ; idxSize <= nbElements ; idxSize *= 2){
+                for(int idxSize = 512 ; idxSize <= nbElements ; idxSize *= 2){
                     for(int idxLoop = 0 ; idxLoop < NbLoops ; ++idxLoop){
                         std::cout << "idxInitData: " << idxInitData << " idxSize: " << idxSize << " idxLoop: " << idxLoop << std::endl;
 
