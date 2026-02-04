@@ -622,7 +622,7 @@ void benmarkSortLargeMerge(const std::string& inBasename){
 
 
 void benmarkSortLargeHybrid(const std::string& inBasename){
-    std::ofstream filecsv(inBasename + "_largemerge.csv");
+    std::ofstream filecsv(inBasename + "_hybrid.csv");
     if(!filecsv.is_open()){
         std::cerr << "Cannot open file" << std::endl;
         return;
