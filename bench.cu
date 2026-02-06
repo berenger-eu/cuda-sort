@@ -1,5 +1,7 @@
 #include "cusort.hpp"
 
+#include "intanddata.hpp"
+
 ////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////
 
@@ -18,7 +20,7 @@ __global__ void benchmarkSortSmall(T* dataToSort, const int nbValuesToSort) {
     Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(dataToSort + blockIdx.x*32, nbValuesToSort);
 }
 
-
+template <typename T>
 void benmark32(const std::string& inBasename){
     std::ofstream filecsv(inBasename + "_32.csv");
     if(!filecsv.is_open()){
@@ -26,7 +28,7 @@ void benmark32(const std::string& inBasename){
         return;
     }
 
-    CuRandManager<int> randManager;
+    CuRandManager<T> randManager;
 
     filecsv << "#testsorted,fullsm,datainit,size,fulltime,time,timelogn" << std::endl;
 
@@ -36,15 +38,15 @@ void benmark32(const std::string& inBasename){
     std::cout << "Free memory: " << freeMem << std::endl;
     std::cout << "Total memory: " << totalMem << std::endl;
 
-    const int nbElements = std::min(1UL << 29, (freeMem / sizeof(int)));
+    const int nbElements = std::min(1UL << 29, (freeMem / sizeof(T)));
     std::cout << "nbElements: " << nbElements << std::endl;
 
     const int nbBlocks = nbElements / 32;
 
-    for_bool([&](auto bool_constant_testsorted) {
-        constexpr bool TestSorted = bool_constant_testsorted.value;
-        for_bool([&](auto bool_constant_fullsm) {
-            constexpr bool FullSM = bool_constant_fullsm.value;
+    //for_bool([&](auto bool_constant_testsorted) {
+        constexpr bool TestSorted = false;//bool_constant_testsorted.value;
+        //for_bool([&](auto bool_constant_fullsm) {
+            constexpr bool FullSM = true;//bool_constant_fullsm.value;
             for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
                 for(int idxSizePerWarp = 1 ; idxSizePerWarp <= 32 ; ++idxSizePerWarp){
                     for(int idxLoop = 0 ; idxLoop < NbLoops ; ++idxLoop){
@@ -52,8 +54,8 @@ void benmark32(const std::string& inBasename){
                             std::cout << "idxInitData: " << idxInitData << " idxSizePerWarp: " << idxSizePerWarp << " idxLoop: " << idxLoop << std::endl;
 
                             // Allocate device memory for the array
-                            int* d_array = nullptr;
-                            CUDA_CHECK(cudaMalloc(&d_array, nbElements * sizeof(int)));
+                            T* d_array = nullptr;
+                            CUDA_CHECK(cudaMalloc(&d_array, nbElements * sizeof(T)));
 
                             SpTimer initTimer;
                             randManager.initArray(d_array, idxSizePerWarp, nbElements, idxInitData);
@@ -67,7 +69,7 @@ void benmark32(const std::string& inBasename){
                             CUDA_CHECK(cudaDeviceSynchronize());
                             SpTimer timer;
 
-                            benchmarkSortSmall<int, TestSorted, FullSM><<<blocksPerGrid, threadsPerBlock>>>(d_array, idxSizePerWarp);
+                            benchmarkSortSmall<T, TestSorted, FullSM><<<blocksPerGrid, threadsPerBlock>>>(d_array, idxSizePerWarp);
 
                             CUDA_CHECK(cudaDeviceSynchronize());
                             timer.stop();
@@ -89,8 +91,8 @@ void benmark32(const std::string& inBasename){
                     }
                 }
             }
-        });
-    });
+        //});
+    //});
 }
 
 
@@ -104,6 +106,7 @@ __global__ void benchmarkSort512(T* dataToSort, const int nbValuesToSort) {
     }
 }
 
+template <typename T>
 void benmark512(const std::string& inBasename){
     std::ofstream filecsv(inBasename + "_512.csv");
     if(!filecsv.is_open()){
@@ -111,7 +114,7 @@ void benmark512(const std::string& inBasename){
         return;
     }
 
-    CuRandManager<int> randManager;
+    CuRandManager<T> randManager;
 
     filecsv << "#testsorted,fullsm,asynccpy,datainit,size,fulltime,time,timelogn" << std::endl;
 
@@ -121,15 +124,15 @@ void benmark512(const std::string& inBasename){
     std::cout << "Free memory: " << freeMem << std::endl;
     std::cout << "Total memory: " << totalMem << std::endl;
 
-    const int nbElements = std::min(1UL << 29, (freeMem / sizeof(int)));
+    const int nbElements = std::min(1UL << 29, (freeMem / sizeof(T)));
     std::cout << "nbElements: " << nbElements << std::endl;
 
     const int nbBlocks = nbElements / DefaultNbThreadsPerBlock;
 
-    for_bool([&](auto bool_constant_testsorted) {
-        constexpr bool TestSorted = bool_constant_testsorted.value;
-        for_bool([&](auto bool_constant_fullsm) {
-            constexpr bool FullSM = bool_constant_fullsm.value;
+   //for_bool([&](auto bool_constant_testsorted) {
+        constexpr bool TestSorted = false;//bool_constant_testsorted.value;
+        //for_bool([&](auto bool_constant_fullsm) {
+            constexpr bool FullSM = true;//bool_constant_fullsm.value;
             for_bool([&](auto bool_constant_asynccpy) {
                 constexpr bool AsynCpy = bool_constant_asynccpy.value;
                 for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
@@ -142,8 +145,8 @@ void benmark512(const std::string& inBasename){
 
 
                                 // Allocate device memory for the array
-                                int* d_array = nullptr;
-                                CUDA_CHECK(cudaMalloc(&d_array, nbElements * sizeof(int)));
+                                T* d_array = nullptr;
+                                CUDA_CHECK(cudaMalloc(&d_array, nbElements * sizeof(T)));
 
                                 SpTimer initTimer;
                                 randManager.initArray(d_array, idxSizePerBlock, nbElements, idxInitData);
@@ -158,7 +161,7 @@ void benmark512(const std::string& inBasename){
                                 CUDA_CHECK(cudaDeviceSynchronize());
                                 SpTimer timer;
 
-                                benchmarkSort512<int, TestSorted, FullSM, AsynCpy><<<blocksPerGrid, threadsPerBlock, NOrPow2*sizeof(int) >>>(d_array, idxSizePerBlock);
+                                benchmarkSort512<T, TestSorted, FullSM, AsynCpy><<<blocksPerGrid, threadsPerBlock, NOrPow2*sizeof(T) >>>(d_array, idxSizePerBlock);
 
                                 CUDA_CHECK(cudaDeviceSynchronize());
                                 timer.stop();
@@ -182,8 +185,8 @@ void benmark512(const std::string& inBasename){
                     }
                 }
             });
-        });
-    });
+        //});
+    //});
 }
 
 
@@ -197,6 +200,7 @@ __global__ void benchmarkSort512_v2(T* dataToSort, const int nbValuesToSort) {
     }
 }
 
+template <typename T>
 void benmark512_v2(const std::string& inBasename){
     std::ofstream filecsv(inBasename + "_512_v2.csv");
     if(!filecsv.is_open()){
@@ -204,7 +208,7 @@ void benmark512_v2(const std::string& inBasename){
         return;
     }
 
-    CuRandManager<int> randManager;
+    CuRandManager<T> randManager;
 
     filecsv << "#testsorted,fullsm,asynccpy,datainit,size,fulltime,time,timelogn" << std::endl;
 
@@ -214,15 +218,15 @@ void benmark512_v2(const std::string& inBasename){
     std::cout << "Free memory: " << freeMem << std::endl;
     std::cout << "Total memory: " << totalMem << std::endl;
 
-    const int nbElements = std::min(1UL << 29, (freeMem / sizeof(int)));
+    const int nbElements = std::min(1UL << 29, (freeMem / sizeof(T)));
     std::cout << "nbElements: " << nbElements << std::endl;
 
     const int nbBlocks = nbElements / DefaultNbThreadsPerBlock;
     
-    for_bool([&](auto bool_constant_testsorted) {
-        constexpr bool TestSorted = bool_constant_testsorted.value;
-        for_bool([&](auto bool_constant_fullsm) {
-            constexpr bool FullSM = bool_constant_fullsm.value;
+    //for_bool([&](auto bool_constant_testsorted) {
+        constexpr bool TestSorted = false;//bool_constant_testsorted.value;
+        //for_bool([&](auto bool_constant_fullsm) {
+            constexpr bool FullSM = true;//bool_constant_fullsm.value;
             for_bool([&](auto bool_constant_asynccpy) {
                 constexpr bool AsynCpy = bool_constant_asynccpy.value;
                 for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
@@ -234,8 +238,8 @@ void benmark512_v2(const std::string& inBasename){
 
 
                                 // Allocate device memory for the array
-                                int* d_array = nullptr;
-                                CUDA_CHECK(cudaMalloc(&d_array, nbElements * sizeof(int)));
+                                T* d_array = nullptr;
+                                CUDA_CHECK(cudaMalloc(&d_array, nbElements * sizeof(T)));
 
                                 SpTimer initTimer;
                                 randManager.initArray(d_array, idxSizePerBlock, nbElements, idxInitData);
@@ -250,7 +254,7 @@ void benmark512_v2(const std::string& inBasename){
                                 CUDA_CHECK(cudaDeviceSynchronize());
                                 SpTimer timer;
 
-                                benchmarkSort512_v2<int, TestSorted, FullSM, AsynCpy><<<blocksPerGrid, threadsPerBlock, 2*NOrPow2*sizeof(int) >>>(d_array, idxSizePerBlock);
+                                benchmarkSort512_v2<T, TestSorted, FullSM, AsynCpy><<<blocksPerGrid, threadsPerBlock, 2*NOrPow2*sizeof(T) >>>(d_array, idxSizePerBlock);
 
                                 CUDA_CHECK(cudaDeviceSynchronize());
                                 timer.stop();
@@ -274,8 +278,8 @@ void benmark512_v2(const std::string& inBasename){
                     }
                 }
             });
-        });
-    });
+        //});
+    //});
 }
 
 
@@ -290,6 +294,7 @@ __global__ void benchmarkSort512_v3(T* dataToSort, const int nbValuesToSort, con
     }
 }
 
+template <typename T>
 void benmark512_v3(const std::string& inBasename){
     std::ofstream filecsv(inBasename + "_512_v3.csv");
     if(!filecsv.is_open()){
@@ -297,7 +302,7 @@ void benmark512_v3(const std::string& inBasename){
         return;
     }
 
-    CuRandManager<int> randManager;
+    CuRandManager<T> randManager;
 
     filecsv << "#testsorted,fullsm,asynccpy,datainit,size,nbthreads,fulltime,time,timelogn" << std::endl;
 
@@ -307,21 +312,21 @@ void benmark512_v3(const std::string& inBasename){
     std::cout << "Free memory: " << freeMem << std::endl;
     std::cout << "Total memory: " << totalMem << std::endl;
 
-    const int maxNbElements = std::min(1UL << 29, (freeMem / sizeof(int)));
+    const int maxNbElements = std::min(1UL << 29, (freeMem / sizeof(T)));
     std::cout << "maxNbElements: " << maxNbElements << std::endl;
 
     int MaxSharedMemSize;
     CUDA_CHECK(cudaDeviceGetAttribute(&MaxSharedMemSize, cudaDevAttrMaxSharedMemoryPerBlock, 0));
     std::cout << "Shared memory size: " << MaxSharedMemSize << std::endl;
-    const int MaxSize = ComputeDefaultMaxBitoSort<int>();
-    assert( MaxSize * sizeof(int) < MaxSharedMemSize );
+    const int MaxSize = ComputeDefaultMaxBitoSort<T>();
+    assert( MaxSize * sizeof(T) < MaxSharedMemSize );
     std::cout << "Max size: " << MaxSize << std::endl;
 
 
-    for_bool([&](auto bool_constant_testsorted) {
-        constexpr bool TestSorted = bool_constant_testsorted.value;
-        for_bool([&](auto bool_constant_fullsm) {
-            constexpr bool FullSM = bool_constant_fullsm.value;
+    //for_bool([&](auto bool_constant_testsorted) {
+        constexpr bool TestSorted = false;//bool_constant_testsorted.value;
+        //for_bool([&](auto bool_constant_fullsm) {
+              constexpr bool FullSM = true;//bool_constant_fullsm.value;
             for_bool([&](auto bool_constant_asynccpy) {
                 constexpr bool AsynCpy = bool_constant_asynccpy.value;
                 for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
@@ -336,12 +341,12 @@ void benmark512_v3(const std::string& inBasename){
                                                 << " idxLoop: " << idxLoop
                                                 << " idxSize " << idxSize
                                                 << " nbElements " << nbElements
-                                                << " sharedMem " << 2*idxSize*sizeof(int)
+                                                << " sharedMem " << 2*idxSize*sizeof(T)
                                                 << std::endl;
 
                                     // Allocate device memory for the array
-                                    int* d_array = nullptr;
-                                    CUDA_CHECK(cudaMalloc(&d_array, nbElements * sizeof(int)));
+                                    T* d_array = nullptr;
+                                    CUDA_CHECK(cudaMalloc(&d_array, nbElements * sizeof(T)));
 
                                     SpTimer initTimer;
                                     randManager.initArray(d_array, idxSize, nbElements, idxInitData);
@@ -356,7 +361,7 @@ void benmark512_v3(const std::string& inBasename){
                                     CUDA_CHECK(cudaDeviceSynchronize());
                                     SpTimer timer;
 
-                                    benchmarkSort512_v3<int, TestSorted, FullSM, AsynCpy><<<blocksPerGrid, threadsPerBlock, 2*NOrPow2*sizeof(int) >>>(d_array, idxSize, NOrPow2);
+                                    benchmarkSort512_v3<T, TestSorted, FullSM, AsynCpy><<<blocksPerGrid, threadsPerBlock, 2*NOrPow2*sizeof(T) >>>(d_array, idxSize, NOrPow2);
 
                                     CUDA_CHECK(cudaDeviceSynchronize());
                                     timer.stop();
@@ -382,13 +387,14 @@ void benmark512_v3(const std::string& inBasename){
                     }
                 }
             });
-        });
-    });
+        //});
+    //});
 }
 
 
 
 
+template <typename T>
 void benmarkSortLarge(const std::string& inBasename){
     std::ofstream filecsv(inBasename + "_large.csv");
     if(!filecsv.is_open()){
@@ -396,7 +402,7 @@ void benmarkSortLarge(const std::string& inBasename){
         return;
     }
 
-    CuRandManager<int> randManager;
+    CuRandManager<T> randManager;
 
     filecsv << "#testsorted,fullsm,asynccpy,datainit,size,time,timelogn" << std::endl;
 
@@ -406,13 +412,13 @@ void benmarkSortLarge(const std::string& inBasename){
     std::cout << "Free memory: " << freeMem << std::endl;
     std::cout << "Total memory: " << totalMem << std::endl;
 
-    const int nbElements = std::min(268435456UL, (freeMem / sizeof(int) / 3));
+    const int nbElements = std::min(268435456UL, (freeMem / sizeof(T) / 3));
     std::cout << "nbElements: " << nbElements << std::endl;
 
-    for_bool([&](auto bool_constant_testsorted) {
-        constexpr bool TestSorted = bool_constant_testsorted.value;
-        for_bool([&](auto bool_constant_fullsm) {
-            constexpr bool FullSM = bool_constant_fullsm.value;
+    //for_bool([&](auto bool_constant_testsorted) {
+        constexpr bool TestSorted = false;//bool_constant_testsorted.value;
+        //for_bool([&](auto bool_constant_fullsm) {
+            constexpr bool FullSM = true;//bool_constant_fullsm.value;
             for_bool([&](auto bool_constant_asynccpy) {
                 constexpr bool AsynCpy = bool_constant_asynccpy.value;
                 for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
@@ -423,8 +429,8 @@ void benmarkSortLarge(const std::string& inBasename){
 
 
                                 // Allocate device memory for the array
-                                int* d_array = nullptr;
-                                CUDA_CHECK(cudaMalloc(&d_array, idxSize * sizeof(int)));
+                                T* d_array = nullptr;
+                                CUDA_CHECK(cudaMalloc(&d_array, idxSize * sizeof(T)));
 
                                 SpTimer initTimer;
                                 randManager.initArray(d_array, idxSize, idxSize, idxInitData);
@@ -434,7 +440,7 @@ void benmarkSortLarge(const std::string& inBasename){
                                 CUDA_CHECK(cudaDeviceSynchronize());
                                 SpTimer timer;
 
-                                Sort<int, TestSorted, FullSM, AsynCpy>(d_array, idxSize);
+                                Sort<T, TestSorted, FullSM, AsynCpy>(d_array, idxSize);
 
                                 CUDA_CHECK(cudaDeviceSynchronize());
                                 timer.stop();
@@ -457,11 +463,12 @@ void benmarkSortLarge(const std::string& inBasename){
                     }
                 }
             });
-        });
-    });
+        //});
+    //});
 }
 
 
+template <typename T>
 void benmarkSortLargeOne(const std::string& inBasename){
     std::ofstream filecsv(inBasename + "_largeone.csv");
     if(!filecsv.is_open()){
@@ -469,7 +476,7 @@ void benmarkSortLargeOne(const std::string& inBasename){
         return;
     }
 
-    CuRandManager<int> randManager;
+    CuRandManager<T> randManager;
 
     filecsv << "#testsorted,fullsm,asynccpy,datainit,size,time,timelogn" << std::endl;
 
@@ -479,15 +486,15 @@ void benmarkSortLargeOne(const std::string& inBasename){
     std::cout << "Free memory: " << freeMem << std::endl;
     std::cout << "Total memory: " << totalMem << std::endl;
 
-    const int nbElements = std::min(268435456UL, (freeMem / sizeof(int) / 3));
+    const int nbElements = std::min(268435456UL, (freeMem / sizeof(T) / 3));
     std::cout << "nbElements: " << nbElements << std::endl;
 
     ThreadPool pool;
 
-    for_bool([&](auto bool_constant_testsorted) {
-        constexpr bool TestSorted = bool_constant_testsorted.value;
-        for_bool([&](auto bool_constant_fullsm) {
-            constexpr bool FullSM = bool_constant_fullsm.value;
+    //for_bool([&](auto bool_constant_testsorted) {
+        constexpr bool TestSorted = false;//bool_constant_testsorted.value;
+        //for_bool([&](auto bool_constant_fullsm) {
+            constexpr bool FullSM = true;//bool_constant_fullsm.value;
             for_bool([&](auto bool_constant_asynccpy) {
                 constexpr bool AsynCpy = bool_constant_asynccpy.value;
                 for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
@@ -498,8 +505,8 @@ void benmarkSortLargeOne(const std::string& inBasename){
 
 
                                 // Allocate device memory for the array
-                                int* d_array = nullptr;
-                                CUDA_CHECK(cudaMalloc(&d_array, idxSize * sizeof(int)));
+                                T* d_array = nullptr;
+                                CUDA_CHECK(cudaMalloc(&d_array, idxSize * sizeof(T)));
 
                                 SpTimer initTimer;
                                 randManager.initArray(d_array, idxSize, idxSize, idxInitData);
@@ -509,7 +516,7 @@ void benmarkSortLargeOne(const std::string& inBasename){
                                 CUDA_CHECK(cudaDeviceSynchronize());
                                 SpTimer timer;
 
-                                SortOne<int, TestSorted, FullSM, AsynCpy>(pool, d_array, idxSize);
+                                SortOne<T, TestSorted, FullSM, AsynCpy>(pool, d_array, idxSize);
 
                                 CUDA_CHECK(cudaDeviceSynchronize());
                                 timer.stop();
@@ -532,11 +539,12 @@ void benmarkSortLargeOne(const std::string& inBasename){
                     }
                 }
             });
-        });
-    });
+        //});
+    //});
 }
 
 
+template <typename T>
 void benmarkSortLargeMerge(const std::string& inBasename){
     std::ofstream filecsv(inBasename + "_largemerge.csv");
     if(!filecsv.is_open()){
@@ -544,7 +552,7 @@ void benmarkSortLargeMerge(const std::string& inBasename){
         return;
     }
 
-    CuRandManager<int> randManager;
+    CuRandManager<T> randManager;
 
     filecsv << "#testsorted,fullsm,asynccpy,datainit,size,time,timelogn" << std::endl;
 
@@ -554,13 +562,13 @@ void benmarkSortLargeMerge(const std::string& inBasename){
     std::cout << "Free memory: " << freeMem << std::endl;
     std::cout << "Total memory: " << totalMem << std::endl;
 
-    const int nbElements = std::min(268435456UL, (freeMem / sizeof(int) / 3));
+    const int nbElements = std::min(268435456UL, (freeMem / sizeof(T) / 3));
     std::cout << "nbElements: " << nbElements << std::endl;
 
-    for_bool([&](auto bool_constant_testsorted) {
-        constexpr bool TestSorted = bool_constant_testsorted.value;
-        for_bool([&](auto bool_constant_fullsm) {
-            constexpr bool FullSM = bool_constant_fullsm.value;
+    //for_bool([&](auto bool_constant_testsorted) {
+        constexpr bool TestSorted = false;//bool_constant_testsorted.value;
+        //for_bool([&](auto bool_constant_fullsm) {
+            constexpr bool FullSM = true;//bool_constant_fullsm.value;
             for_bool([&](auto bool_constant_asynccpy) {
                 constexpr bool AsynCpy = bool_constant_asynccpy.value;
                 for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
@@ -571,8 +579,8 @@ void benmarkSortLargeMerge(const std::string& inBasename){
 
 
                                 // Allocate device memory for the array
-                                int* d_array = nullptr;
-                                CUDA_CHECK(cudaMalloc(&d_array, idxSize * sizeof(int)));
+                                T* d_array = nullptr;
+                                CUDA_CHECK(cudaMalloc(&d_array, idxSize * sizeof(T)));
 
                                 SpTimer initTimer;
                                 randManager.initArray(d_array, idxSize, idxSize, idxInitData);
@@ -582,7 +590,7 @@ void benmarkSortLargeMerge(const std::string& inBasename){
                                 CUDA_CHECK(cudaDeviceSynchronize());
                                 SpTimer timer;
 
-                                SortMerge<int, 2048>(d_array, idxSize);
+                                SortMerge<T, ComputeDefaultMaxBitoSort<T>()/2, TestSorted, FullSM>(d_array, idxSize);
 
                                 CUDA_CHECK(cudaDeviceSynchronize());
                                 timer.stop();
@@ -605,11 +613,12 @@ void benmarkSortLargeMerge(const std::string& inBasename){
                     }
                 }
             });
-        });
-    });
+        //});
+    //});
 }
 
 
+template <typename T>
 void benmarkSortLargeHybrid(const std::string& inBasename){
     std::ofstream filecsv(inBasename + "_hybrid.csv");
     if(!filecsv.is_open()){
@@ -617,7 +626,7 @@ void benmarkSortLargeHybrid(const std::string& inBasename){
         return;
     }
 
-    CuRandManager<int> randManager;
+    CuRandManager<T> randManager;
 
     filecsv << "#testsorted,fullsm,datainit,size,time,timelogn" << std::endl;
 
@@ -627,21 +636,21 @@ void benmarkSortLargeHybrid(const std::string& inBasename){
     std::cout << "Free memory: " << freeMem << std::endl;
     std::cout << "Total memory: " << totalMem << std::endl;
 
-    const int nbElements = std::min(268435456UL, (freeMem / sizeof(int) / 3));
+    const int nbElements = std::min(268435456UL, (freeMem / sizeof(T) / 3));
     std::cout << "nbElements: " << nbElements << std::endl;
 
-    for_bool([&](auto bool_constant_testsorted) {
-        constexpr bool TestSorted = bool_constant_testsorted.value;
-        for_bool([&](auto bool_constant_fullsm) {
-            constexpr bool FullSM = bool_constant_fullsm.value;
+    //for_bool([&](auto bool_constant_testsorted) {
+        constexpr bool TestSorted = false;//bool_constant_testsorted.value;
+        //for_bool([&](auto bool_constant_fullsm) {
+            constexpr bool FullSM = true;//bool_constant_fullsm.value;
             for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
                 for(int idxSize = 512 ; idxSize <= nbElements ; idxSize *= 2){
                     for(int idxLoop = 0 ; idxLoop < NbLoops ; ++idxLoop){
                         std::cout << "idxInitData: " << idxInitData << " idxSize: " << idxSize << " idxLoop: " << idxLoop << std::endl;
 
                         // Allocate device memory for the array
-                        int* d_array = nullptr;
-                        CUDA_CHECK(cudaMalloc(&d_array, idxSize * sizeof(int)));
+                        T* d_array = nullptr;
+                        CUDA_CHECK(cudaMalloc(&d_array, idxSize * sizeof(T)));
 
                         SpTimer initTimer;
                         randManager.initArray(d_array, idxSize, idxSize, idxInitData);
@@ -651,7 +660,7 @@ void benmarkSortLargeHybrid(const std::string& inBasename){
                         CUDA_CHECK(cudaDeviceSynchronize());
                         SpTimer timer;
 
-                        HybridSort<int>(d_array, idxSize);
+                        HybridSort<T, ComputeDefaultMaxBitoSort<T>()/2, 512, TestSorted, FullSM>(d_array, idxSize);
 
                         CUDA_CHECK(cudaDeviceSynchronize());
                         timer.stop();
@@ -671,8 +680,8 @@ void benmarkSortLargeHybrid(const std::string& inBasename){
                     }
                 }
             }
-        });
-    });
+        //});
+    //});
 }
 
 
@@ -681,6 +690,7 @@ void benmarkSortLargeHybrid(const std::string& inBasename){
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
 
+template <typename T>
 void benmarkThrust(const std::string& inBasename){
     std::ofstream filecsv(inBasename + "_thrust.csv");
     if(!filecsv.is_open()){
@@ -688,7 +698,7 @@ void benmarkThrust(const std::string& inBasename){
         return;
     }
 
-    CuRandManager<int> randManager;
+    CuRandManager<T> randManager;
 
     filecsv << "#datainit,size,time,timelogn" << std::endl;
 
@@ -698,7 +708,7 @@ void benmarkThrust(const std::string& inBasename){
     std::cout << "Free memory: " << freeMem << std::endl;
     std::cout << "Total memory: " << totalMem << std::endl;
 
-    const int nbElements = std::min(268435456UL, (freeMem / sizeof(int) / 3));
+    const int nbElements = std::min(268435456UL, (freeMem / sizeof(T) / 3));
     std::cout << "nbElements: " << nbElements << std::endl;
 
     for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
@@ -714,15 +724,15 @@ void benmarkThrust(const std::string& inBasename){
                     }
 
 
-                    int* d_array = nullptr;
-                    CUDA_CHECK(cudaMalloc(&d_array, idxSize * sizeof(int)));
+                    T* d_array = nullptr;
+                    CUDA_CHECK(cudaMalloc(&d_array, idxSize * sizeof(T)));
 
                     SpTimer initTimer;
                     randManager.initArray(d_array, idxSize, idxSize, idxInitData);
                     initTimer.stop();
                     std::cout << "Init time: " << initTimer.getElapsed() << "s" << std::endl;
 
-                    thrust::device_ptr<int> d_ptr = thrust::device_pointer_cast(d_array);
+                    thrust::device_ptr<T> d_ptr = thrust::device_pointer_cast(d_array);
 
                     CUDA_CHECK(cudaDeviceSynchronize());
                     SpTimer timer;
@@ -759,16 +769,31 @@ std::string GetDateTime(){
 }
 
 void benchmarkAll(){
-    const std::string filename = "benchmark_" + GetDateTime();
-    benmark32(filename);
-    benmark512(filename);
-    benmark512_v2(filename);
-    benmark512_v3(filename);
-    benmarkSortLarge(filename);
-    // Too slowbenmarkSortLargeOne(filename);
-    benmarkSortLargeMerge(filename);
-    benmarkThrust(filename);
-    benmarkSortLargeHybrid(filename);
+    const auto datetime = GetDateTime();
+    {
+        const std::string filename = "benchmark_int_" + datetime;
+        benmark32<int>(filename);
+        benmark512<int>(filename);
+        benmark512_v2<int>(filename);
+        benmark512_v3<int>(filename);
+        benmarkSortLarge<int>(filename);
+        // Too slowbenmarkSortLargeOne(filename);
+        benmarkSortLargeMerge<int>(filename);
+        benmarkThrust<int>(filename);
+        benmarkSortLargeHybrid<int>(filename);
+    }
+    {
+        const std::string filename = "benchmark_struct_" + datetime;
+        benmark32<IntAndData>(filename);
+        benmark512<IntAndData>(filename);
+        benmark512_v2<IntAndData>(filename);
+        benmark512_v3<IntAndData>(filename);
+        benmarkSortLarge<IntAndData>(filename);
+        // Too slowbenmarkSortLargeOne(filename);
+        benmarkSortLargeMerge<IntAndData>(filename);
+        benmarkThrust<IntAndData>(filename);
+        benmarkSortLargeHybrid<IntAndData>(filename);
+    }
 }
 
 ////////////////////////////////////////////////////////////////////
