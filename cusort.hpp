@@ -1297,6 +1297,10 @@ __global__ void SortOnePartition(T* dataToSort, const int size){
 
 template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito, int MinNbParts = 32, int MaxNbParts = 1024>
 __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream = 0, T* dataBuffer = nullptr){
+    if(nbValuesToSort <= 1){
+        return;
+    }
+
     if(nbValuesToSort <= 32){
         Sort_1Warp_SM_le32<T, TestIfSorted, FullSM><<<1,32,0,stream>>>(dataToSort, nbValuesToSort);
         return;
@@ -1357,8 +1361,8 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
                                             counterParts+1,
                                             dataBuffer, NbParts);
 
-    int pivotsHost[NbParts];
-    CUDA_CHECK(cudaMemcpyAsync(pivotsHost, pivots, NbParts * sizeof(int), cudaMemcpyDeviceToHost, stream));
+    T pivotsHost[NbParts];
+    CUDA_CHECK(cudaMemcpyAsync(pivotsHost, pivots, NbParts * sizeof(T), cudaMemcpyDeviceToHost, stream));
 
     CUDA_CHECK(cudaMemcpyAsync(dataToSort, dataBuffer, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice, stream));
     CUDA_CHECK(cudaFreeAsync(pivots, stream));
