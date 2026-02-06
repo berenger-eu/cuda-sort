@@ -1,39 +1,5 @@
 #include "cusort.hpp"
 
-////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////
-
-#include <fstream>
-
-
-template <bool TBoo>
-struct ConstexprBool{
-    static constexpr bool value = TBoo;
-};
-
-template <typename Func>
-void for_bool(Func&& func) {
-    func(ConstexprBool<true>());
-    func(ConstexprBool<false>());
-}
-
-// Template iterator to iterate on integers at compile time
-template<int Start, int End, typename Func>
-void for_int_step1(Func&& func) {
-    if constexpr (Start < End) {
-        func(std::integral_constant<int, Start>{});
-        for_int_step1<Start + 1, End>(std::forward<Func>(func));
-    }
-}
-
-template<int Start, int End, typename Func>
-void for_int_pow2(Func&& func) {
-    if constexpr (Start < End) {
-        func(std::integral_constant<int, Start>{});
-        for_int_pow2<Start*2, End>(std::forward<Func>(func));
-    }
-}
-
 
 ////////////////////////////////////////////////////////////////////
 
@@ -367,9 +333,9 @@ std::string GetDateTime(){
 void tuneAll(){
     const std::string datetime = GetDateTime();
     const std::string filename = "tune_sort_" + datetime;
-    //benmarkSortLarge(filename);
+    benmarkSortLarge(filename);
     // Too slow benmarkSortLargeOne(filename);
-    // benmarkSortLargeMerge(filename);
+     benmarkSortLargeMerge(filename);
     benmarkSortLargeHybrid(filename);
 }
 ////////////////////////////////////////////////////////////////////

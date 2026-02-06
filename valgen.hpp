@@ -44,7 +44,8 @@ __global__ void InitRandStates(curandState_t* states, const int totalThreads) {
 }
 
 // Kernel to initialize the array using the random states (or arithmetic)
-__global__ void InitArray(curandState_t* states, int *d_array,
+template <class T>
+__global__ void InitArray(curandState_t* states, T *d_array,
                             const int idxSizePerBlock,
                             const int inNbElements,
                             const int idxInitData) {
@@ -113,7 +114,7 @@ public:
     CuRandManager(const CuRandManager&) = delete;
     CuRandManager& operator=(const CuRandManager&) = delete;
 
-    void initArray(int *d_array, const int idxSizePerBlock, const int inNbElements, const int idxInitData){
+    void initArray(T *d_array, const int idxSizePerBlock, const int inNbElements, const int idxInitData){
         InitArray<<<nbBlocks, nbThreadsPerBlock>>>(d_randStates, d_array, idxSizePerBlock, inNbElements, idxInitData);
         CUDA_CHECK(cudaDeviceSynchronize());
     }

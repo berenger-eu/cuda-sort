@@ -16,12 +16,64 @@
 
 #include "SpTimer.hpp"
 
+////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////
+
+#include <fstream>
+
+
+template <bool TBoo>
+struct ConstexprBool{
+    static constexpr bool value = TBoo;
+};
+
+template <typename Func>
+void for_bool(Func&& func) {
+    func(ConstexprBool<true>());
+    func(ConstexprBool<false>());
+}
+
+// Template iterator to iterate on integers at compile time
+template<int Start, int End, typename Func>
+void for_int_step1(Func&& func) {
+    if constexpr (Start < End) {
+        func(std::integral_constant<int, Start>{});
+        for_int_step1<Start + 1, End>(std::forward<Func>(func));
+    }
+}
+
+template<int Start, int End, typename Func>
+void for_int_pow2(Func&& func) {
+    if constexpr (Start < End) {
+        func(std::integral_constant<int, Start>{});
+        for_int_pow2<Start*2, End>(std::forward<Func>(func));
+    }
+}
+
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
 
 constexpr const int DefaultNbThreadsPerBlock = 512;
 constexpr const int DefaultMaxBitoSortV2 = DefaultNbThreadsPerBlock;
-constexpr const int DefaultMaxBitoSort = 4096;
+
+
+
+constexpr __forceinline__ __device__ __host__ int LowerPowerOf2EqualOrSmaller(int nbValuesToSort){
+    int res = 1;
+    while(res*2 <= nbValuesToSort){
+        res *= 2;
+    }
+    return res;
+}
+
+template <typename T>
+constexpr __forceinline__ __device__ __host__ int ComputeDefaultMaxBitoSort(){
+    const int SharedMemPerBlock = 49152; // in bytes, for current GPU architecture
+    const int MaxValuesBySharedMem = SharedMemPerBlock / sizeof(T);
+    const int MaxValuesBySharedMemPow2 = LowerPowerOf2EqualOrSmaller(MaxValuesBySharedMem);
+    return MaxValuesBySharedMemPow2/2;
+}
+
 
 void CUDA_CHECK(cudaError_t err) {
     if (err != cudaSuccess) {
@@ -41,34 +93,34 @@ __forceinline__ __device__ __host__ int GreaterPowerOf2EqualOrLarger(int nbValue
 
 
 template <typename T>
-__device__ __forceinline__  constexpr T my_numeric_limits_max(){
+__host__ __device__ __forceinline__  constexpr T my_numeric_limits_max(){
     if constexpr (std::is_same<T, int>::value){
         return 2147483647;
     }
-    else if(std::is_same<T, float>::value){
+    else if constexpr(std::is_same<T, float>::value){
         return 3.40282e+38; 
     }
-    else if(std::is_same<T, double>::value){
+    else if constexpr(std::is_same<T, double>::value){
         return 1.79769e+308;
     }
     else{
-        return 0;
+        return T::max();
     }
 }
 
 template <typename T>
-__device__ __forceinline__  constexpr T my_numeric_limits_min(){
+__host__ __device__ __forceinline__  constexpr T my_numeric_limits_min(){
     if constexpr (std::is_same<T, int>::value){
         return -2147483648;
     }
-    else if(std::is_same<T, float>::value){
+    else if constexpr(std::is_same<T, float>::value){
         return -3.40282e+38;
     }
-    else if(std::is_same<T, double>::value){
+    else if constexpr(std::is_same<T, double>::value){
         return -1.79769e+308;
     }
     else{
-        return 0;
+        return T::min();
     }
 }
 
@@ -78,14 +130,14 @@ __device__ __forceinline__ T getNextVal(const T& val){
     if constexpr (std::is_same<T, int>::value){
         return val + 1;
     }
-    else if(std::is_same<T, float>::value){
+    else if constexpr(std::is_same<T, float>::value){
         return std::nextafter(val, CUDART_INF_F);
     }
-    else if(std::is_same<T, double>::value){
+    else if constexpr(std::is_same<T, double>::value){
         return std::nextafter(val, CUDART_INF);
     }
     else{
-        return 0;
+        return val.nextVal();
     }
 }
 
@@ -94,14 +146,14 @@ __device__ __forceinline__ T getPrevVal(const T& val){
     if constexpr (std::is_same<T, int>::value){
         return val - 1;
     }
-    else if(std::is_same<T, float>::value){
+    else if constexpr(std::is_same<T, float>::value){
         return std::nextafter(val, -CUDART_INF_F);
     }
-    else if(std::is_same<T, double>::value){
+    else if constexpr(std::is_same<T, double>::value){
         return std::nextafter(val, -CUDART_INF);
     }
     else{
-        return 0;
+        return val.prevVal();
     }
 }
 
@@ -112,14 +164,14 @@ inline __host__ T getNextVal(const T& val){
     if constexpr (std::is_same<T, int>::value){
         return val + 1;
     }
-    else if(std::is_same<T, float>::value){
+    else if constexpr(std::is_same<T, float>::value){
         return std::nextafter(val, std::numeric_limits<float>::infinity());
     }
-    else if(std::is_same<T, double>::value){
+    else if constexpr(std::is_same<T, double>::value){
         return std::nextafter(val, std::numeric_limits<double>::infinity());
     }
     else{
-        return 0;
+        return val.nextVal();
     }
 }
 
@@ -128,14 +180,14 @@ inline __host__ T getPrevVal(const T& val){
     if constexpr (std::is_same<T, int>::value){
         return val - 1;
     }
-    else if(std::is_same<T, float>::value){
+    else if constexpr(std::is_same<T, float>::value){
         return std::nextafter(val, -std::numeric_limits<float>::infinity());
     }
-    else if(std::is_same<T, double>::value){
+    else if constexpr(std::is_same<T, double>::value){
         return std::nextafter(val, -std::numeric_limits<double>::infinity());
     }
     else{
-        return 0;
+        return val.prevVal();
     }
 }
 
@@ -495,7 +547,8 @@ __device__ __forceinline__ void Core_Sort_1Block_SM_gt32_d(T* dataToSort, const 
 template <typename T, bool TestIfSorted, bool FullSM>
 __device__ void Sort_1Block_gt32_d_extsm(T* dataToSort, const int nbValuesToSort) {
     // Declare shared memory ptr
-    extern __shared__ T shared[];
+    extern __shared__ __align__(16) unsigned char smem[]; // untyped dynamic shared memory
+    T* shared = reinterpret_cast<T*>(smem);
     assert(nbValuesToSort <= blockDim.x);
     // Copy
     if(threadIdx.x < nbValuesToSort){
@@ -522,7 +575,8 @@ __global__ void Sort_1Block_gt32_extsm(T* dataToSort, const int nbValuesToSort) 
 template <typename T, bool TestIfSorted, bool FullSM>
 __device__ void Sort_1Block_async_gt32_d_extsm(T* dataToSort, const int nbValuesToSort) {
     // Declare shared memory ptr
-    extern __shared__ T shared_data[];
+    extern __shared__ __align__(16) unsigned char smem[]; // untyped dynamic shared memory
+    T* shared_data = reinterpret_cast<T*>(smem);
 
     auto block = cooperative_groups::this_thread_block();
 
@@ -696,7 +750,9 @@ __device__ __forceinline__ T* Core_Sort_1Block_SM_gt32_d_v2(T* __restrict__ data
 template <typename T, bool TestIfSorted, bool FullSM>
 __device__ void Sort_1Block_gt32_d_extsm_v2(T* dataToSort, const int nbValuesToSort) {
     // Declare shared memory ptr
-    extern __shared__ T shared[];
+    extern __shared__ __align__(16) unsigned char smem[]; // untyped dynamic shared memory
+    T* shared = reinterpret_cast<T*>(smem);
+
     assert(nbValuesToSort <= blockDim.x);
     // Copy
     if(threadIdx.x < nbValuesToSort){
@@ -724,7 +780,8 @@ __global__ void Sort_1Block_gt32_extsm_v2(T* dataToSort, const int nbValuesToSor
 template <typename T, bool TestIfSorted, bool FullSM>
 __device__ void Sort_1Block_async_gt32_d_extsm_v2(T* dataToSort, const int nbValuesToSort) {
     // Declare shared memory ptr
-    extern __shared__ T shared_data[];
+        extern __shared__ __align__(16) unsigned char smem[]; // untyped dynamic shared memory
+    T* shared_data = reinterpret_cast<T*>(smem);
 
     auto block = cooperative_groups::this_thread_block();
 
@@ -919,7 +976,9 @@ template <typename T, bool TestIfSorted, bool FullSM>
 __device__ void Sort_1Block_gt32_d_extsm_v3(T* dataToSort, const int nbValuesToSort, 
                                             const int nbWorkingValues) {
     // Declare shared memory ptr
-    extern __shared__ T shared[];
+    extern __shared__ __align__(16) unsigned char smem[]; // untyped dynamic shared memory
+    T* shared = reinterpret_cast<T*>(smem);
+
     // Copy
     for(int idxVal = threadIdx.x ; idxVal < nbValuesToSort ; idxVal += blockDim.x){
         shared[idxVal] = dataToSort[idxVal];
@@ -947,7 +1006,8 @@ template <typename T, bool TestIfSorted, bool FullSM>
 __device__ void Sort_1Block_async_gt32_d_extsm_v3(T* dataToSort, const int nbValuesToSort, 
                                                   const int nbWorkingValues) {
     // Declare shared memory ptr
-    extern __shared__ T shared_data[];
+    extern __shared__ __align__(16) unsigned char smem[]; // untyped dynamic shared memory
+    T* shared_data = reinterpret_cast<T*>(smem);
 
     auto block = cooperative_groups::this_thread_block();
 
@@ -1120,8 +1180,8 @@ __device__ void BuildPrefix_SM_device(ElementType* prefix, IndexType N) {
     }
 }
 
-template <typename NumType, typename IndexType, const int MaxNbParts>
-__global__ void BuildPrefix_SM( NumType* prefixTree, const IndexType inSize){
+template <typename IndexType, const int MaxNbParts>
+__global__ void BuildPrefix_SM( IndexType* prefixTree, const IndexType inSize){
     __shared__ IndexType buffer[MaxNbParts];
 
     for(IndexType idx = threadIdx.x ; idx < inSize ; idx += blockDim.x){
@@ -1140,7 +1200,7 @@ __global__ void BuildPrefix_SM( NumType* prefixTree, const IndexType inSize){
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
 
-template <typename T, int MaxParts>
+template <typename T, int MaxParts, bool TestIfSorted, bool FullSM>
 __global__ void Sort_core_buildPivots(T* __restrict__ dataToSort, const int nbValuesToSort, T* __restrict__ pivots, const int nbParts){
     // We copy values from the array to build the partition
     assert(gridDim.x == 1);
@@ -1165,16 +1225,16 @@ __global__ void Sort_core_buildPivots(T* __restrict__ dataToSort, const int nbVa
     __syncthreads();
 
     if(nbParts <= 32){
-        Core_Sort_1Warp_SM_le32_d<T, false, false>(localPivots, nbParts);
+        Core_Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(localPivots, nbParts);
         // There is a syncthread in the function
     }
     else if(nbParts <= 512){
-        Core_Sort_1Block_SM_gt32_d<T, false, false>(localPivots, nbParts);
+        Core_Sort_1Block_SM_gt32_d<T, TestIfSorted, FullSM>(localPivots, nbParts);
         // There is a syncthread in the function
     }
     else {
         __shared__ T buffer[MaxParts];
-        Core_Sort_1Block_SM_gt32_d_v3<T, false, false>(localPivots, nbParts,
+        Core_Sort_1Block_SM_gt32_d_v3<T, TestIfSorted, FullSM>(localPivots, nbParts,
                                                             buffer, MaxParts);
         // There is a syncthread in the function
     }
@@ -1201,9 +1261,9 @@ __global__ void SortPartitions(T* __restrict__ dataToSort, const int nbValuesToS
             Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(dataToSort+start, size);
             __syncthreads();
         }
-        else if(size <= DefaultMaxBitoSort){
+        else if(size <= ComputeDefaultMaxBitoSort<T>()){
             const int NOrPow2 = GreaterPowerOf2EqualOrLarger(size);
-            assert(NOrPow2 <= DefaultMaxBitoSort);
+            assert(NOrPow2 <= ComputeDefaultMaxBitoSort<T>());
             if constexpr(ASyncCpyBito){
                 Sort_1Block_async_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort+start, size, NOrPow2);
             }
@@ -1216,14 +1276,14 @@ __global__ void SortPartitions(T* __restrict__ dataToSort, const int nbValuesToS
 
 template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito>
 __global__ void SortOnePartition(T* dataToSort, const int size){
-    assert(size <= DefaultMaxBitoSort);
+    assert(size <= ComputeDefaultMaxBitoSort<T>());
     if(size <= 32){
         Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(dataToSort, size);
         __syncthreads();
     }
-    else if(size <= DefaultMaxBitoSort){
+    else if(size <= ComputeDefaultMaxBitoSort<T>()){
         const int NOrPow2 = GreaterPowerOf2EqualOrLarger(size);
-        assert(NOrPow2 <= DefaultMaxBitoSort);
+        assert(NOrPow2 <= ComputeDefaultMaxBitoSort<T>());
         if constexpr(ASyncCpyBito){
             Sort_1Block_async_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort, size, NOrPow2);
         }
@@ -1256,7 +1316,7 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
         return;
     }
 
-    if(NOrPow2 <= DefaultMaxBitoSort){
+    if(NOrPow2 <= ComputeDefaultMaxBitoSort<T>()){
         const int nbThreads = std::min(NOrPow2, MaxThreadsPerBlock);
         if constexpr(ASyncCpyBito){
             Sort_1Block_async_gt32_extsm_v3<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort, NOrPow2);
@@ -1275,12 +1335,12 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
         CUDA_CHECK(cudaMallocAsync(&dataBuffer, nbValuesToSort * sizeof(T), stream));
     }
 
-    int* pivots = nullptr;
-    CUDA_CHECK(cudaMallocAsync(&pivots, NbParts * sizeof(int), stream));
-    CUDA_CHECK(cudaMemsetAsync(pivots, 0, NbParts * sizeof(int), stream));
+    T* pivots = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&pivots, NbParts * sizeof(T), stream));
+    CUDA_CHECK(cudaMemsetAsync(pivots, 0, NbParts * sizeof(T), stream));
 
     const int NbPartsPow2Or32 = std::max(32, NbPartsPow2);
-    Sort_core_buildPivots<T, MaxNbParts><<<1, NbPartsPow2Or32, 0, stream>>>(dataToSort, nbValuesToSort, pivots, NbParts);
+    Sort_core_buildPivots<T, MaxNbParts, TestIfSorted, FullSM><<<1, NbPartsPow2Or32, 0, stream>>>(dataToSort, nbValuesToSort, pivots, NbParts);
 
     int* counterParts = nullptr;
     CUDA_CHECK(cudaMallocAsync(&counterParts, (NbParts+2) * sizeof(int), stream));
@@ -1290,7 +1350,7 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
 
     CountParts_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock, 0, stream >>>(dataToSort, nbValuesToSort, pivots, counterParts+2, NbParts);
 
-    BuildPrefix_SM<T, int, MaxNbParts><<<1,NbParts,0,stream>>>(counterParts+2, NbParts);
+    BuildPrefix_SM<int, MaxNbParts><<<1,NbParts,0,stream>>>(counterParts+2, NbParts);
 
     MoveElements_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock,0,stream >>>(dataToSort, nbValuesToSort,
                                             pivots,
@@ -1314,7 +1374,7 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
         const int start = counterPartsHost[idxPart];
         const int end = counterPartsHost[idxPart+1];
         const int size = end-start;
-        if(size > maxSizePartToSort && size <= DefaultMaxBitoSort){
+        if(size > maxSizePartToSort && size <= ComputeDefaultMaxBitoSort<T>()){
             maxSizePartToSort = size;
         }
     }
@@ -1328,7 +1388,7 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
         const int start = counterPartsHost[idxPart];
         const int end = counterPartsHost[idxPart+1];
         const int size = end-start;
-        if(size > DefaultMaxBitoSort
+        if(size > ComputeDefaultMaxBitoSort<T>()
                 && (idxPart == NbParts-1 || getNextVal(pivotsHost[idxPart]) < pivotsHost[idxPart+1])){
             Sort<T, TestIfSorted, FullSM, ASyncCpyBito, MinNbParts, MaxNbParts>(dataToSort+start, size, stream, dataBuffer+start);
         }
@@ -1363,7 +1423,7 @@ __host__ void SortOnePar(ThreadPool& pool, T* dataToSort, const int nbValuesToSo
         return;
     }
 
-    if(NOrPow2 <= DefaultMaxBitoSort){
+    if(NOrPow2 <= ComputeDefaultMaxBitoSort<T>()){
         const int nbThreads = std::min(NOrPow2, MaxThreadsPerBlock);
         if constexpr(ASyncCpyBito){
             Sort_1Block_async_gt32_extsm_v3<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort, NOrPow2);
@@ -1382,11 +1442,11 @@ __host__ void SortOnePar(ThreadPool& pool, T* dataToSort, const int nbValuesToSo
         CUDA_CHECK(cudaMallocAsync(&dataBuffer, nbValuesToSort * sizeof(T), stream));
     }
 
-    int* pivots = nullptr;
-    CUDA_CHECK(cudaMallocAsync(&pivots, NbParts * sizeof(int), stream));
-    CUDA_CHECK(cudaMemsetAsync(pivots, 0, NbParts * sizeof(int), stream));
+    T* pivots = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&pivots, NbParts * sizeof(T), stream));
+    CUDA_CHECK(cudaMemsetAsync(pivots, 0, NbParts * sizeof(T), stream));
 
-    Sort_core_buildPivots<T, MaxNbParts><<<1, NbPartsPow2, 0, stream>>>(dataToSort, nbValuesToSort, pivots, NbParts);
+    Sort_core_buildPivots<T, MaxNbParts, TestIfSorted, FullSM><<<1, NbPartsPow2, 0, stream>>>(dataToSort, nbValuesToSort, pivots, NbParts);
 
     int* counterParts = nullptr;
     CUDA_CHECK(cudaMallocAsync(&counterParts, (NbParts+2) * sizeof(int), stream));
@@ -1396,7 +1456,7 @@ __host__ void SortOnePar(ThreadPool& pool, T* dataToSort, const int nbValuesToSo
 
     CountParts_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock, 0, stream >>>(dataToSort, nbValuesToSort, pivots, counterParts+2, NbParts);
 
-    BuildPrefix_SM<T, int, MaxNbParts><<<1,NbParts,0,stream>>>(counterParts+2, NbParts);
+    BuildPrefix_SM<int, MaxNbParts><<<1,NbParts,0,stream>>>(counterParts+2, NbParts);
 
     MoveElements_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock,0,stream >>>(dataToSort, nbValuesToSort,
                                             pivots,
@@ -1427,14 +1487,14 @@ __host__ void SortOnePar(ThreadPool& pool, T* dataToSort, const int nbValuesToSo
         const int start = counterPartsHost[idxPart];
         const int end = counterPartsHost[idxPart+1];
         const int size = end-start;
-        if(size > DefaultMaxBitoSort
+        if(size > ComputeDefaultMaxBitoSort<T>()
                 && (idxPart == NbParts-1 || getNextVal(pivotsHost[idxPart]) < pivotsHost[idxPart+1])){
             g.run([&, idxPart, start, size]
             {
                 SortOnePar<T, TestIfSorted, FullSM, ASyncCpyBito, MinNbParts, MaxNbParts>(pool, dataToSort+start, size, asyncSorts[idxPart], dataBuffer+start);
             });
         }
-        else if(size <= DefaultMaxBitoSort && size > 0){
+        else if(size <= ComputeDefaultMaxBitoSort<T>() && size > 0){
             g.run([&, idxPart, start, size]
             {
                 const int NOrPow2Part = GreaterPowerOf2EqualOrLarger(size);
@@ -1570,7 +1630,7 @@ __global__ void mergeKernel(
 
 
 
-template <typename T, const int MaxValuesToSort>
+template <typename T, const int MaxValuesToSort, bool TestIfSorted, bool FullSM>
 __global__ void SortChunks(T* dataToSort, const int nbValuesToSort){
     const int nbChunks = (nbValuesToSort + MaxValuesToSort - 1) / MaxValuesToSort;
     for(int idxChunk = blockIdx.x ; idxChunk < nbChunks; idxChunk += gridDim.x){
@@ -1578,23 +1638,23 @@ __global__ void SortChunks(T* dataToSort, const int nbValuesToSort){
         const int end = min(start+MaxValuesToSort, nbValuesToSort);
         const int size = end-start;
         if(size <= 32){
-            Sort_1Warp_SM_le32_d<T, false, false>(dataToSort+start, size);
+            Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(dataToSort+start, size);
         }
         else if(size <= DefaultMaxBitoSortV2){
             const int NOrPow2 = GreaterPowerOf2EqualOrLarger(size);
             assert(NOrPow2 <= DefaultMaxBitoSortV2);
-            Sort_1Block_gt32_d_extsm_v2<T, false, false>(dataToSort+start, size);
+            Sort_1Block_gt32_d_extsm_v2<T, TestIfSorted, FullSM>(dataToSort+start, size);
         }
         else if(size <= MaxValuesToSort){
             const int NOrPow2 = GreaterPowerOf2EqualOrLarger(size);
             assert(NOrPow2 <= MaxValuesToSort);
-            Sort_1Block_gt32_d_extsm_v3<T, false, false>(dataToSort+start, size, NOrPow2);
+            Sort_1Block_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort+start, size, NOrPow2);
         }
     }
 }
 
 
-template <typename T, int MaxValuesToSort = DefaultMaxBitoSort>
+template <typename T, int MaxValuesToSort = ComputeDefaultMaxBitoSort<T>(), bool TestIfSorted = false, bool FullSM = false>
 __host__ void SortMerge(
     T* dataToSort,
     const int nbValuesToSort,
@@ -1605,9 +1665,6 @@ __host__ void SortMerge(
 ){
     // MaxValuesToSort must be power of 2
     static_assert(((MaxValuesToSort - 1) & MaxValuesToSort) == 0, "MaxValuesToSort must be a power of 2");
-
-    constexpr bool TestIfSorted = false;
-    constexpr bool FullSM       = false;
 
     auto ceil_div = [](int a, int b) -> int { return (a + b - 1) / b; };
 
@@ -1621,7 +1678,7 @@ __host__ void SortMerge(
     }
 
     const int NOrPow2 = GreaterPowerOf2EqualOrLarger(nbValuesToSort);
-    if (NOrPow2 <= DefaultMaxBitoSort) {
+    if (NOrPow2 <= ComputeDefaultMaxBitoSort<T>()) {
         const int nbThreads = std::min(NOrPow2, DefaultNbThreadsPerBlock);
         Sort_1Block_gt32_extsm_v3<T, TestIfSorted, FullSM>
             <<<1, nbThreads, 2 * NOrPow2 * sizeof(T), stream>>>(dataToSort, nbValuesToSort, NOrPow2);
@@ -1631,7 +1688,7 @@ __host__ void SortMerge(
     // 1) Sort chunks (in-place)
     {
         const int NbBlocks = ceil_div(nbValuesToSort, MaxValuesToSort);
-        SortChunks<T, MaxValuesToSort>
+        SortChunks<T, MaxValuesToSort, TestIfSorted, FullSM>
             <<<NbBlocks, DefaultNbThreadsPerBlock, MaxValuesToSort * 2 * sizeof(T), stream>>>(
                 dataToSort, nbValuesToSort
             );
@@ -1692,12 +1749,12 @@ __host__ void HybridSort(T* dataToSort, const int nbValuesToSort, cudaStream_t s
 
     // If the array is small enough, we use SortMerge
     if (nbValuesToSort <= MaxValuesToSort * 16) {
-        SortMerge<T, MaxValuesToSort>(dataToSort, nbValuesToSort, DefaultNbThreadsPerBlock, stream);
+        SortMerge<T, MaxValuesToSort, TestIfSorted, FullSM>(dataToSort, nbValuesToSort, DefaultNbThreadsPerBlock, stream);
         return;
     }
 
     // Otherwise, we multipartition it and then sort each partition with merge sort
-    const int NbParts = std::min(MaxNbParts, (nbValuesToSort/MaxValuesToSort)+1);
+    const int NbParts = std::min(MaxNbParts, (nbValuesToSort/ComputeDefaultMaxBitoSort<T>())+1);
     const int NbPartsPow2 = GreaterPowerOf2EqualOrLarger(NbParts);
 
     const bool allocatedDataBuffer = (dataBuffer == nullptr);
@@ -1705,12 +1762,12 @@ __host__ void HybridSort(T* dataToSort, const int nbValuesToSort, cudaStream_t s
         CUDA_CHECK(cudaMallocAsync(&dataBuffer, nbValuesToSort * sizeof(T), stream));
     }
 
-    int* pivots = nullptr;
-    CUDA_CHECK(cudaMallocAsync(&pivots, NbParts * sizeof(int), stream));
-    CUDA_CHECK(cudaMemsetAsync(pivots, 0, NbParts * sizeof(int), stream));
+    T* pivots = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&pivots, NbParts * sizeof(T), stream));
+    CUDA_CHECK(cudaMemsetAsync(pivots, 0, NbParts * sizeof(T), stream));
 
     const int NbPartsPow2Or32 = std::max(32, NbPartsPow2);
-    Sort_core_buildPivots<T, MaxNbParts><<<1, NbPartsPow2Or32, 0, stream>>>(dataToSort, nbValuesToSort, pivots, NbParts);
+    Sort_core_buildPivots<T, MaxNbParts, TestIfSorted, FullSM><<<1, NbPartsPow2Or32, 0, stream>>>(dataToSort, nbValuesToSort, pivots, NbParts);
 
     int* counterParts = nullptr;
     CUDA_CHECK(cudaMallocAsync(&counterParts, (NbParts+2) * sizeof(int), stream));
@@ -1721,7 +1778,7 @@ __host__ void HybridSort(T* dataToSort, const int nbValuesToSort, cudaStream_t s
 
     CountParts_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock, 0, stream >>>(dataToSort, nbValuesToSort, pivots, counterParts+2, NbParts);
 
-    BuildPrefix_SM<T, int, MaxNbParts><<<1,NbParts,0,stream>>>(counterParts+2, NbParts);
+    BuildPrefix_SM<int, MaxNbParts><<<1,NbParts,0,stream>>>(counterParts+2, NbParts);
 
     MoveElements_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock,0,stream >>>(dataToSort, nbValuesToSort,
                                             pivots,
@@ -1752,7 +1809,7 @@ __host__ void HybridSort(T* dataToSort, const int nbValuesToSort, cudaStream_t s
         const int start = counterPartsHost[idxPart];
         const int end = counterPartsHost[idxPart+1];
         const int size = end-start;
-        SortMerge<T, DefaultMaxBitoSort>(dataToSort+start, size, DefaultNbThreadsPerBlock, asyncSorts[idxPart % kStreams], dataBuffer+start, size);
+        SortMerge<T, ComputeDefaultMaxBitoSort<T>(), TestIfSorted, FullSM>(dataToSort+start, size, DefaultNbThreadsPerBlock, asyncSorts[idxPart % kStreams], dataBuffer+start, size);
     }
 
     for(int idxPart = 0 ; idxPart < kStreams ; idxPart++){

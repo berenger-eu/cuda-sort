@@ -6,18 +6,6 @@
 #include <fstream>
 
 
-template <bool TBoo>
-struct ConstexprBool{
-    static constexpr bool value = TBoo;
-};
-
-template <typename Func>
-constexpr void for_bool(Func&& func) {
-    func(ConstexprBool<true>());
-    func(ConstexprBool<false>());
-}
-
-
 ////////////////////////////////////////////////////////////////////
 
 #include "valgen.hpp"
@@ -325,7 +313,8 @@ void benmark512_v3(const std::string& inBasename){
     int MaxSharedMemSize;
     CUDA_CHECK(cudaDeviceGetAttribute(&MaxSharedMemSize, cudaDevAttrMaxSharedMemoryPerBlock, 0));
     std::cout << "Shared memory size: " << MaxSharedMemSize << std::endl;
-    const int MaxSize = std::min(DefaultMaxBitoSort, int(MaxSharedMemSize / sizeof(int) / 2));
+    const int MaxSize = ComputeDefaultMaxBitoSort<int>();
+    assert( MaxSize * sizeof(int) < MaxSharedMemSize );
     std::cout << "Max size: " << MaxSize << std::endl;
 
 
@@ -630,7 +619,7 @@ void benmarkSortLargeHybrid(const std::string& inBasename){
 
     CuRandManager<int> randManager;
 
-    filecsv << "#testsorted,fullsm,datainit,size,NbParts,MaxValuesToSort,time,timelogn" << std::endl;
+    filecsv << "#testsorted,fullsm,datainit,size,time,timelogn" << std::endl;
 
     // Get amount of free global memory
     size_t freeMem, totalMem;
