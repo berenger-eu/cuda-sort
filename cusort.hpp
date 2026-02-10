@@ -1209,15 +1209,13 @@ __global__ void Sort_core_buildPivots(T* __restrict__ dataToSort, const int nbVa
     assert(32 <= blockDim.x);
     static_assert(((MaxParts - 1) & MaxParts) == 0, "MaxParts must be a power of 2");
     __shared__ T localPivots[MaxParts];
-
-    const int nbSubParts = nbParts-3;
     
-    if(threadIdx.x < 2){
+    if(threadIdx.x < 1){
         localPivots[threadIdx.x] = my_numeric_limits_min<T>();
     } 
-    for(int idx = threadIdx.x + 2 ; idx < nbParts ; idx += blockDim.x){
-        const int step = nbValuesToSort/(nbSubParts+1);
-        localPivots[idx] = dataToSort[min(nbValuesToSort-1, step*idx-2)];
+    for(int idx = threadIdx.x + 1 ; idx < nbParts ; idx += blockDim.x){
+        const int step = nbValuesToSort/nbParts;
+        localPivots[idx] = dataToSort[min(nbValuesToSort-1, step*idx)];
     }
     for(int idx = threadIdx.x + nbParts ; idx < MaxParts ; idx += blockDim.x){
         localPivots[idx] = my_numeric_limits_max<T>();
@@ -1238,17 +1236,17 @@ __global__ void Sort_core_buildPivots(T* __restrict__ dataToSort, const int nbVa
                                                             buffer, MaxParts);
         // There is a syncthread in the function
     }
-
-    if(threadIdx.x == 0){
-        localPivots[1] = getPrevVal(localPivots[2]);
-        localPivots[nbParts-1] = getNextVal(localPivots[nbParts-2]);
-    }   
-    __syncthreads();
     
+    if(threadIdx.x == 0){
+        localPivots[nbParts-1] = getNextVal(localPivots[nbParts-2]);
+        __syncthreads();
+    }
+
     for(int idx = threadIdx.x ; idx < nbParts ; idx += blockDim.x){
-        pivots[threadIdx.x] = localPivots[threadIdx.x];
+        pivots[idx] = localPivots[idx];
     }
     __syncthreads();
+
 }
 
 template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito>
@@ -1382,9 +1380,10 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
             maxSizePartToSort = size;
         }
     }
-    const int maxSizePartToSortPow2 = GreaterPowerOf2EqualOrLarger(maxSizePartToSort);
-
-    SortPartitions<T, TestIfSorted, FullSM, ASyncCpyBito><<< NbParts, MaxThreadsPerBlock, maxSizePartToSortPow2*2*sizeof(T),stream>>>(dataToSort, nbValuesToSort, counterParts, NbParts);
+    if(maxSizePartToSort){
+        const int maxSizePartToSortPow2 = GreaterPowerOf2EqualOrLarger(maxSizePartToSort);
+        SortPartitions<T, TestIfSorted, FullSM, ASyncCpyBito><<< NbParts, MaxThreadsPerBlock, maxSizePartToSortPow2*2*sizeof(T),stream>>>(dataToSort, nbValuesToSort, counterParts, NbParts);
+    }
 
     CUDA_CHECK(cudaFreeAsync(counterParts, stream));  
 
