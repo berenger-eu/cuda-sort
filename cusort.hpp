@@ -1239,8 +1239,8 @@ __global__ void Sort_core_buildPivots(T* __restrict__ dataToSort, const int nbVa
     
     if(threadIdx.x == 0){
         localPivots[nbParts-1] = getNextVal(localPivots[nbParts-2]);
-        __syncthreads();
     }
+    __syncthreads();
 
     for(int idx = threadIdx.x ; idx < nbParts ; idx += blockDim.x){
         pivots[idx] = localPivots[idx];
