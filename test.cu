@@ -495,60 +495,6 @@ void testLarge() {
 }
 
 
-template<typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito>
-void testLargeOne() {
-    // Limit the size to this value
-    const int MaxSize = (1 << 20);
-    std::cout << "Max size: " << MaxSize << std::endl;
-
-    ThreadPool pool;
-    CuRandManager<T> randManager;
-
-    for(int idxSize = 32 ; idxSize < MaxSize ; idxSize *= 2){
-        for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
-            // Number of elements to sort
-            const int N = idxSize;
-            const int NOrPow2 = GreaterPowerOf2EqualOrLarger(N);
-            assert(((NOrPow2-1) & NOrPow2) == 0);
-
-            std::cout << "Testing with " << N << " elements" << std::endl;
-
-            // Allocate device memory for the array
-            T* d_array = nullptr;
-            CUDA_CHECK(cudaMalloc(&d_array, N * sizeof(T)));
-
-            randManager.initArray(d_array, idxSize, idxSize, idxInitData);
-            
-            std::vector<T> h_sorted(N);
-            CUDA_CHECK(cudaMemcpy(h_sorted.data(), d_array, N * sizeof(T), cudaMemcpyDeviceToHost));
-            std::sort(h_sorted.begin(), h_sorted.end());
-
-            SortOne<T, TestIfSorted, FullSM, ASyncCpyBito>(pool, d_array, N);
-
-            // Wait for GPU to finish before accessing on host
-            CUDA_CHECK(cudaDeviceSynchronize());
-
-            // Copy the (supposedly sorted) array back from device to host
-            std::vector<T> h_result(N);
-            CUDA_CHECK(cudaMemcpy(h_result.data(), d_array, N * sizeof(T), cudaMemcpyDeviceToHost));
-
-            // Free device memory
-            CUDA_CHECK(cudaFree(d_array));
-
-            // Verify that the device result matches the sorted host array
-            if (h_result != h_sorted) {
-                for(int i = 0 ; i < N ; i++){
-                    if(h_result[i] != h_sorted[i]){
-                        std::cout << i << " " << h_result[i] << " " << h_sorted[i] << std::endl;
-                    }
-                }
-                std::cout << "The array is NOT correctly sorted." << std::endl;
-                assert(0);
-            }
-        }
-    }
-}
-
 template <typename T, bool TestIfSorted, bool FullSM>
 void testLargeMerge() {
     // Limit the size to this value
@@ -698,23 +644,6 @@ int main() {
                 for_bool([&](auto bool_constant_asynccpy) {
                     constexpr bool AsynCpy = bool_constant_asynccpy.value;
                     testLarge<int, TestSorted, FullSM, AsynCpy>();
-                });
-            });
-        });
-
-        constexpr bool TestSorted = false;
-        constexpr bool FullSM = true;
-        constexpr bool AsynCpy = false;
-        testLarge<IntAndData, TestSorted, FullSM, AsynCpy>();
-    }
-    if(true){
-        for_bool([&](auto bool_constant_testsorted) {
-            constexpr bool TestSorted = bool_constant_testsorted.value;
-            for_bool([&](auto bool_constant_fullsm) {
-                constexpr bool FullSM = bool_constant_fullsm.value;
-                for_bool([&](auto bool_constant_asynccpy) {
-                    constexpr bool AsynCpy = bool_constant_asynccpy.value;
-                    testLargeOne<int, TestSorted, FullSM, AsynCpy>();
                 });
             });
         });

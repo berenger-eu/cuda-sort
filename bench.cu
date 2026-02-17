@@ -17,7 +17,7 @@ constexpr int NbLoops = 5;
 
 template <typename T, bool TestIfSorted, bool FullSM>
 __global__ void benchmarkSortSmall(T* dataToSort, const int nbValuesToSort) {
-    Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(dataToSort + blockIdx.x*32, nbValuesToSort);
+    Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(dataToSort + blockIdx.x*32, dataToSort + blockIdx.x*32, nbValuesToSort);
 }
 
 template <typename T>
@@ -193,10 +193,10 @@ void benmark512(const std::string& inBasename){
 template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito>
 __global__ void benchmarkSort512_v2(T* dataToSort, const int nbValuesToSort) {
     if constexpr(ASyncCpyBito){
-        Sort_1Block_async_gt32_d_extsm_v2<T, TestIfSorted, FullSM>(dataToSort + blockIdx.x*nbValuesToSort, nbValuesToSort);
+        Sort_1Block_async_gt32_d_extsm_v2<T, TestIfSorted, FullSM>(dataToSort + blockIdx.x*nbValuesToSort, dataToSort + blockIdx.x*nbValuesToSort, nbValuesToSort);
     }
     else{
-        Sort_1Block_gt32_d_extsm_v2<T, TestIfSorted, FullSM>(dataToSort + blockIdx.x*nbValuesToSort, nbValuesToSort);
+        Sort_1Block_gt32_d_extsm_v2<T, TestIfSorted, FullSM>(dataToSort + blockIdx.x*nbValuesToSort, dataToSort + blockIdx.x*nbValuesToSort, nbValuesToSort);
     }
 }
 
@@ -287,10 +287,10 @@ void benmark512_v2(const std::string& inBasename){
 template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito>
 __global__ void benchmarkSort512_v3(T* dataToSort, const int nbValuesToSort, const int nbWorkingValues) {
     if constexpr(ASyncCpyBito){
-        Sort_1Block_async_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort + blockIdx.x*nbValuesToSort, nbValuesToSort, nbWorkingValues);
+        Sort_1Block_async_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort + blockIdx.x*nbValuesToSort, dataToSort + blockIdx.x*nbValuesToSort, nbValuesToSort, nbWorkingValues);
     }
     else{
-        Sort_1Block_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort + blockIdx.x*nbValuesToSort, nbValuesToSort, nbWorkingValues);
+        Sort_1Block_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort + blockIdx.x*nbValuesToSort, dataToSort + blockIdx.x*nbValuesToSort, nbValuesToSort, nbWorkingValues);
     }
 }
 
@@ -466,83 +466,6 @@ void benmarkSortLarge(const std::string& inBasename){
         //});
     //});
 }
-
-
-template <typename T>
-void benmarkSortLargeOne(const std::string& inBasename){
-    std::ofstream filecsv(inBasename + "_largeone.csv");
-    if(!filecsv.is_open()){
-        std::cerr << "Cannot open file" << std::endl;
-        return;
-    }
-
-    CuRandManager<T> randManager;
-
-    filecsv << "#testsorted,fullsm,asynccpy,datainit,size,time,timelogn" << std::endl;
-
-    // Get amount of free global memory
-    size_t freeMem, totalMem;
-    CUDA_CHECK(cudaMemGetInfo(&freeMem, &totalMem));
-    std::cout << "Free memory: " << freeMem << std::endl;
-    std::cout << "Total memory: " << totalMem << std::endl;
-
-    const int nbElements = std::min(268435456UL, (freeMem / sizeof(T) / 3));
-    std::cout << "nbElements: " << nbElements << std::endl;
-
-    ThreadPool pool;
-
-    //for_bool([&](auto bool_constant_testsorted) {
-        constexpr bool TestSorted = false;//bool_constant_testsorted.value;
-        //for_bool([&](auto bool_constant_fullsm) {
-            constexpr bool FullSM = true;//bool_constant_fullsm.value;
-            for_bool([&](auto bool_constant_asynccpy) {
-                constexpr bool AsynCpy = bool_constant_asynccpy.value;
-                for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
-                    for(int idxSize = 512 ; idxSize <= nbElements ; idxSize *= 2){
-                        for(int idxLoop = 0 ; idxLoop < NbLoops ; ++idxLoop){
-                            {
-                                std::cout << "idxInitData: " << idxInitData << " idxSize: " << idxSize << " idxLoop: " << idxLoop << std::endl;
-
-
-                                // Allocate device memory for the array
-                                T* d_array = nullptr;
-                                CUDA_CHECK(cudaMalloc(&d_array, idxSize * sizeof(T)));
-
-                                SpTimer initTimer;
-                                randManager.initArray(d_array, idxSize, idxSize, idxInitData);
-                                initTimer.stop();
-                                std::cout << "Init time: " << initTimer.getElapsed() << "s" << std::endl;
-                                
-                                CUDA_CHECK(cudaDeviceSynchronize());
-                                SpTimer timer;
-
-                                SortOne<T, TestSorted, FullSM, AsynCpy>(pool, d_array, idxSize);
-
-                                CUDA_CHECK(cudaDeviceSynchronize());
-                                timer.stop();
-
-                                std::cout << "Time: " << timer.getElapsed() << "s" << std::endl;
-
-                                // Free device memory
-                                CUDA_CHECK(cudaFree(d_array));
-
-                                filecsv << (TestSorted?"TRUE":"FALSE") << "," 
-                                        << (FullSM?"TRUE":"FALSE") << "," 
-                                        << (AsynCpy?"TRUE":"FALSE") << "," 
-                                        << InitDataString(idxInitData) << "," 
-                                        << idxSize << "," 
-                                        << timer.getElapsed() << ","
-                                        << timer.getElapsed()/(idxSize * std::log2(idxSize))
-                                        << std::endl;
-                            }
-                        }
-                    }
-                }
-            });
-        //});
-    //});
-}
-
 
 template <typename T>
 void benmarkSortLargeMerge(const std::string& inBasename){
@@ -777,7 +700,6 @@ void benchmarkAll(){
         benmark512_v2<int>(filename);
         benmark512_v3<int>(filename);
         benmarkSortLarge<int>(filename);
-        // Too slowbenmarkSortLargeOne(filename);
         benmarkSortLargeMerge<int>(filename);
         benmarkThrust<int>(filename);
         benmarkSortLargeHybrid<int>(filename);
@@ -789,7 +711,6 @@ void benchmarkAll(){
         benmark512_v2<IntAndData>(filename);
         benmark512_v3<IntAndData>(filename);
         benmarkSortLarge<IntAndData>(filename);
-        // Too slowbenmarkSortLargeOne(filename);
         benmarkSortLargeMerge<IntAndData>(filename);
         benmarkThrust<IntAndData>(filename);
         benmarkSortLargeHybrid<IntAndData>(filename);

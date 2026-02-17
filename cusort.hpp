@@ -375,7 +375,7 @@ __device__ __forceinline__ void Core_Sort_1Warp_SM_le32_d(T* dataToSort, const i
 }
 
 template <typename T, bool TestIfSorted, bool FullSM>
-__device__ void Sort_1Warp_SM_le32_d(T* dataToSort, const int nbValuesToSort){
+__device__ void Sort_1Warp_SM_le32_d(T* dataToSort, T* output, const int nbValuesToSort){
     assert(nbValuesToSort <= 32);
     assert(32 <= blockDim.x);
     __shared__ T shared[32];
@@ -391,7 +391,7 @@ __device__ void Sort_1Warp_SM_le32_d(T* dataToSort, const int nbValuesToSort){
     Core_Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(shared, nbValuesToSort);
     // Copy back
     if(threadIdx.x < nbValuesToSort){
-        dataToSort[threadIdx.x] = shared[threadIdx.x];
+        output[threadIdx.x] = shared[threadIdx.x];
     }
     // Ensure all threads see the new data
     __syncthreads();
@@ -399,7 +399,12 @@ __device__ void Sort_1Warp_SM_le32_d(T* dataToSort, const int nbValuesToSort){
 
 template <typename T, bool TestIfSorted, bool FullSM>
 __global__ void Sort_1Warp_SM_le32(T* dataToSort, const int nbValuesToSort){
-    Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(dataToSort, nbValuesToSort);
+    Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(dataToSort, dataToSort, nbValuesToSort);
+}
+
+template <typename T, bool TestIfSorted, bool FullSM>
+__global__ void Sort_1Warp_SM_le32_outofplace(T* dataToSort, T* output, const int nbValuesToSort){
+    Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(dataToSort, output, nbValuesToSort);
 }
 
 // Sort at least 32 vales inplace.
@@ -748,7 +753,7 @@ __device__ __forceinline__ T* Core_Sort_1Block_SM_gt32_d_v2(T* __restrict__ data
 
 // Template CUDA kernel to sort an array
 template <typename T, bool TestIfSorted, bool FullSM>
-__device__ void Sort_1Block_gt32_d_extsm_v2(T* dataToSort, const int nbValuesToSort) {
+__device__ void Sort_1Block_gt32_d_extsm_v2(T* dataToSort, T* output, const int nbValuesToSort) {
     // Declare shared memory ptr
     extern __shared__ __align__(16) unsigned char smem[]; // untyped dynamic shared memory
     T* shared = reinterpret_cast<T*>(smem);
@@ -767,18 +772,23 @@ __device__ void Sort_1Block_gt32_d_extsm_v2(T* dataToSort, const int nbValuesToS
     T* lastArray = Core_Sort_1Block_SM_gt32_d_v2<T, TestIfSorted, FullSM>(shared, nbValuesToSort, buffer);
     // Copy back
     if(threadIdx.x < nbValuesToSort){
-        dataToSort[threadIdx.x] = lastArray[threadIdx.x];
+        output[threadIdx.x] = lastArray[threadIdx.x];
     }
     __syncthreads();
 }
 
 template <typename T, bool TestIfSorted, bool FullSM>
 __global__ void Sort_1Block_gt32_extsm_v2(T* dataToSort, const int nbValuesToSort) {
-    Sort_1Block_gt32_d_extsm_v2<T, TestIfSorted, FullSM>(dataToSort, nbValuesToSort);
+    Sort_1Block_gt32_d_extsm_v2<T, TestIfSorted, FullSM>(dataToSort, dataToSort, nbValuesToSort);
 }
 
 template <typename T, bool TestIfSorted, bool FullSM>
-__device__ void Sort_1Block_async_gt32_d_extsm_v2(T* dataToSort, const int nbValuesToSort) {
+__global__ void Sort_1Block_gt32_extsm_v2_outofplace(T* dataToSort, T* output, const int nbValuesToSort) {
+    Sort_1Block_gt32_d_extsm_v2<T, TestIfSorted, FullSM>(dataToSort, output, nbValuesToSort);
+}
+
+template <typename T, bool TestIfSorted, bool FullSM>
+__device__ void Sort_1Block_async_gt32_d_extsm_v2(T* dataToSort, T* output, const int nbValuesToSort) {
     // Declare shared memory ptr
         extern __shared__ __align__(16) unsigned char smem[]; // untyped dynamic shared memory
     T* shared_data = reinterpret_cast<T*>(smem);
@@ -798,7 +808,7 @@ __device__ void Sort_1Block_async_gt32_d_extsm_v2(T* dataToSort, const int nbVal
     T* lastArray = Core_Sort_1Block_SM_gt32_d_v2<T, TestIfSorted, FullSM>(shared_data, nbValuesToSort, buffer);
 
     // Copy back
-    cooperative_groups::memcpy_async(block, dataToSort, lastArray, sizeof(T) * nbValuesToSort);
+    cooperative_groups::memcpy_async(block, output, lastArray, sizeof(T) * nbValuesToSort);
     cooperative_groups::wait(block); // Ensure copy back is complete
 }
 
@@ -806,7 +816,13 @@ __device__ void Sort_1Block_async_gt32_d_extsm_v2(T* dataToSort, const int nbVal
 // Template CUDA kernel to sort an array
 template <typename T, bool TestIfSorted, bool FullSM>
 __global__ void Sort_1Block_async_gt32_extsm_v2(T* dataToSort, const int nbValuesToSort) {
-    Sort_1Block_async_gt32_d_extsm_v2<T, TestIfSorted, FullSM>(dataToSort, nbValuesToSort);
+    Sort_1Block_async_gt32_d_extsm_v2<T, TestIfSorted, FullSM>(dataToSort, dataToSort, nbValuesToSort);
+}
+
+// Template CUDA kernel to sort an array
+template <typename T, bool TestIfSorted, bool FullSM>
+__global__ void Sort_1Block_async_gt32_extsm_v2_outofplace(T* dataToSort, T* output, const int nbValuesToSort) {
+    Sort_1Block_async_gt32_d_extsm_v2<T, TestIfSorted, FullSM>(dataToSort, output, nbValuesToSort);
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -973,7 +989,7 @@ __device__ __forceinline__ T* Core_Sort_1Block_SM_gt32_d_v3(T* __restrict__ data
 
 // Template CUDA kernel to sort an array
 template <typename T, bool TestIfSorted, bool FullSM>
-__device__ void Sort_1Block_gt32_d_extsm_v3(T* dataToSort, const int nbValuesToSort, 
+__device__ void Sort_1Block_gt32_d_extsm_v3(T* dataToSort, T* output, const int nbValuesToSort, 
                                             const int nbWorkingValues) {
     // Declare shared memory ptr
     extern __shared__ __align__(16) unsigned char smem[]; // untyped dynamic shared memory
@@ -992,18 +1008,23 @@ __device__ void Sort_1Block_gt32_d_extsm_v3(T* dataToSort, const int nbValuesToS
     T* lastArray = Core_Sort_1Block_SM_gt32_d_v3<T, TestIfSorted, FullSM>(shared, nbValuesToSort, buffer, nbWorkingValues);
     // Copy back
     for(int idxVal = threadIdx.x ; idxVal < nbValuesToSort ; idxVal += blockDim.x){
-        dataToSort[idxVal] = lastArray[idxVal];
+        output[idxVal] = lastArray[idxVal];
     }
     __syncthreads();
 }
 
 template <typename T, bool TestIfSorted, bool FullSM>
 __global__ void Sort_1Block_gt32_extsm_v3(T* dataToSort, const int nbValuesToSort, const int nbWorkingValues) {
-    Sort_1Block_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort, nbValuesToSort, nbWorkingValues);
+    Sort_1Block_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort, dataToSort, nbValuesToSort, nbWorkingValues);
 }
 
 template <typename T, bool TestIfSorted, bool FullSM>
-__device__ void Sort_1Block_async_gt32_d_extsm_v3(T* dataToSort, const int nbValuesToSort, 
+__global__ void Sort_1Block_gt32_extsm_v3_outofplace(T* dataToSort, T* output, const int nbValuesToSort, const int nbWorkingValues) {
+    Sort_1Block_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort, output, nbValuesToSort, nbWorkingValues);
+}
+
+template <typename T, bool TestIfSorted, bool FullSM>
+__device__ void Sort_1Block_async_gt32_d_extsm_v3(T* dataToSort, T* output, const int nbValuesToSort, 
                                                   const int nbWorkingValues) {
     // Declare shared memory ptr
     extern __shared__ __align__(16) unsigned char smem[]; // untyped dynamic shared memory
@@ -1024,7 +1045,7 @@ __device__ void Sort_1Block_async_gt32_d_extsm_v3(T* dataToSort, const int nbVal
     T* lastArray = Core_Sort_1Block_SM_gt32_d_v3<T, TestIfSorted, FullSM>(shared_data, nbValuesToSort, buffer, nbWorkingValues);
 
     // Copy back
-    cooperative_groups::memcpy_async(block, dataToSort, lastArray, sizeof(T) * nbValuesToSort);
+    cooperative_groups::memcpy_async(block, output, lastArray, sizeof(T) * nbValuesToSort);
     cooperative_groups::wait(block); // Ensure copy back is complete
 }
 
@@ -1032,9 +1053,13 @@ __device__ void Sort_1Block_async_gt32_d_extsm_v3(T* dataToSort, const int nbVal
 // Template CUDA kernel to sort an array
 template <typename T, bool TestIfSorted, bool FullSM>
 __global__ void Sort_1Block_async_gt32_extsm_v3(T* dataToSort, const int nbValuesToSort, const int nbWorkingValues) {
-    Sort_1Block_async_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort, nbValuesToSort, nbWorkingValues);
+    Sort_1Block_async_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort, dataToSort, nbValuesToSort, nbWorkingValues);
 }
 
+template <typename T, bool TestIfSorted, bool FullSM>
+__global__ void Sort_1Block_async_gt32_extsm_v3_outofplace(T* dataToSort, T* output, const int nbValuesToSort, const int nbWorkingValues) {
+    Sort_1Block_async_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort, output, nbValuesToSort, nbWorkingValues);
+}
 
 
 ///////////////////////////////////////////////////////////////////////////
@@ -1256,17 +1281,40 @@ __global__ void SortPartitions(T* __restrict__ dataToSort, const int nbValuesToS
         const int end = counterParts[idxPart+1];
         const int size = end-start;
         if(size <= 32){
-            Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(dataToSort+start, size);
+            Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(dataToSort+start, dataToSort+start, size);
             __syncthreads();
         }
         else if(size <= ComputeDefaultMaxBitoSort<T>()){
             const int NOrPow2 = GreaterPowerOf2EqualOrLarger(size);
             assert(NOrPow2 <= ComputeDefaultMaxBitoSort<T>());
             if constexpr(ASyncCpyBito){
-                Sort_1Block_async_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort+start, size, NOrPow2);
+                Sort_1Block_async_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort+start, dataToSort+start, size, NOrPow2);
             }
             else{
-                Sort_1Block_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort+start, size, NOrPow2);
+                Sort_1Block_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort+start, dataToSort+start, size, NOrPow2);
+            }
+        }
+    }
+}
+
+template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito>
+__global__ void SortPartitions_outofplace(T* __restrict__ dataToSort, T* __restrict__ dataToSortOut, const int nbValuesToSort, const int* __restrict__ counterParts, const int nbParts){
+    for(int idxPart = blockIdx.x ; idxPart < nbParts; idxPart += gridDim.x){
+        const int start = counterParts[idxPart];
+        const int end = counterParts[idxPart+1];
+        const int size = end-start;
+        if(size <= 32){
+            Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(dataToSort+start, dataToSortOut+start, size);
+            __syncthreads();
+        }
+        else if(size <= ComputeDefaultMaxBitoSort<T>()){
+            const int NOrPow2 = GreaterPowerOf2EqualOrLarger(size);
+            assert(NOrPow2 <= ComputeDefaultMaxBitoSort<T>());
+            if constexpr(ASyncCpyBito){
+                Sort_1Block_async_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort+start, dataToSortOut+start, size, NOrPow2);
+            }
+            else{
+                Sort_1Block_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort+start, dataToSortOut+start, size, NOrPow2);
             }
         }
     }
@@ -1293,14 +1341,22 @@ __global__ void SortOnePartition(T* dataToSort, const int size){
 
 
 
-template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito, int MinNbParts = 32, int MaxNbParts = 1024>
-__host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream = 0, T* dataBuffer = nullptr){
+template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito, int MinNbParts, int MaxNbParts>
+__host__ void SortCore(T* dataToSort, const int nbValuesToSort, cudaStream_t stream, T* dataBuffer, bool storedInRightPlaced){
     if(nbValuesToSort <= 1){
+        if(storedInRightPlaced == false){
+            CUDA_CHECK(cudaMemcpyAsync(dataBuffer, dataToSort, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice, stream));
+        }
         return;
     }
 
     if(nbValuesToSort <= 32){
-        Sort_1Warp_SM_le32<T, TestIfSorted, FullSM><<<1,32,0,stream>>>(dataToSort, nbValuesToSort);
+        if(storedInRightPlaced == false){
+            Sort_1Warp_SM_le32_outofplace<T, TestIfSorted, FullSM><<<1,32,0,stream>>>(dataToSort, dataBuffer, nbValuesToSort);
+        }
+        else{
+            Sort_1Warp_SM_le32<T, TestIfSorted, FullSM><<<1,32,0,stream>>>(dataToSort, nbValuesToSort);
+        }
         return;
     }
 
@@ -1310,10 +1366,20 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
     if(NOrPow2 <= DefaultMaxBitoSortV2){
         const int nbThreads = std::min(NOrPow2, MaxThreadsPerBlock);
         if constexpr(ASyncCpyBito){
-            Sort_1Block_async_gt32_extsm_v2<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort);
+            if(storedInRightPlaced == false){
+                Sort_1Block_async_gt32_extsm_v2_outofplace<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, dataBuffer, nbValuesToSort);
+            }
+            else{
+                Sort_1Block_async_gt32_extsm_v2<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort);
+            }
         }
         else{
-            Sort_1Block_gt32_extsm_v2<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort);
+            if(storedInRightPlaced == false){
+                Sort_1Block_gt32_extsm_v2_outofplace<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, dataBuffer, nbValuesToSort);
+            }
+            else{
+                Sort_1Block_gt32_extsm_v2<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort);
+            }
         }
         return;
     }
@@ -1321,10 +1387,20 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
     if(NOrPow2 <= ComputeDefaultMaxBitoSort<T>()){
         const int nbThreads = std::min(NOrPow2, MaxThreadsPerBlock);
         if constexpr(ASyncCpyBito){
-            Sort_1Block_async_gt32_extsm_v3<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort, NOrPow2);
+            if(storedInRightPlaced == false){
+                Sort_1Block_async_gt32_extsm_v3_outofplace<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, dataBuffer, nbValuesToSort, NOrPow2);
+            }
+            else{
+                Sort_1Block_async_gt32_extsm_v3<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort, NOrPow2);
+            }
         }
         else{
-            Sort_1Block_gt32_extsm_v3<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort, NOrPow2);
+            if(storedInRightPlaced == false){
+                Sort_1Block_gt32_extsm_v3_outofplace<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, dataBuffer, nbValuesToSort, NOrPow2);
+            }
+            else{
+                Sort_1Block_gt32_extsm_v3<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort, NOrPow2);
+            }
         }
         return;
     }
@@ -1362,7 +1438,7 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
     T pivotsHost[NbParts];
     CUDA_CHECK(cudaMemcpyAsync(pivotsHost, pivots, NbParts * sizeof(T), cudaMemcpyDeviceToHost, stream));
 
-    CUDA_CHECK(cudaMemcpyAsync(dataToSort, dataBuffer, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice, stream));
+    // Not needed anymore : CUDA_CHECK(cudaMemcpyAsync(dataToSort, dataBuffer, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice, stream));
     CUDA_CHECK(cudaFreeAsync(pivots, stream));
 
     int counterPartsHost[NbParts+1];
@@ -1382,7 +1458,12 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
     }
     if(maxSizePartToSort){
         const int maxSizePartToSortPow2 = GreaterPowerOf2EqualOrLarger(maxSizePartToSort);
-        SortPartitions<T, TestIfSorted, FullSM, ASyncCpyBito><<< NbParts, MaxThreadsPerBlock, maxSizePartToSortPow2*2*sizeof(T),stream>>>(dataToSort, nbValuesToSort, counterParts, NbParts);
+        if(storedInRightPlaced == true){
+            SortPartitions_outofplace<T, TestIfSorted, FullSM, ASyncCpyBito><<< NbParts, MaxThreadsPerBlock, maxSizePartToSortPow2*2*sizeof(T),stream>>>(dataBuffer, dataToSort, nbValuesToSort, counterParts, NbParts);
+        }
+        else{
+            SortPartitions<T, TestIfSorted, FullSM, ASyncCpyBito><<< NbParts, MaxThreadsPerBlock, maxSizePartToSortPow2*2*sizeof(T),stream>>>(dataBuffer, nbValuesToSort, counterParts, NbParts);
+        }
     }
 
     CUDA_CHECK(cudaFreeAsync(counterParts, stream));  
@@ -1391,9 +1472,13 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
         const int start = counterPartsHost[idxPart];
         const int end = counterPartsHost[idxPart+1];
         const int size = end-start;
-        if(size > ComputeDefaultMaxBitoSort<T>()
-                && (idxPart == NbParts-1 || getNextVal(pivotsHost[idxPart]) < pivotsHost[idxPart+1])){
-            Sort<T, TestIfSorted, FullSM, ASyncCpyBito, MinNbParts, MaxNbParts>(dataToSort+start, size, stream, dataBuffer+start);
+        if(size > ComputeDefaultMaxBitoSort<T>()){
+            if((idxPart == NbParts-1 || getNextVal(pivotsHost[idxPart]) < pivotsHost[idxPart+1])){
+                SortCore<T, TestIfSorted, FullSM, ASyncCpyBito, MinNbParts, MaxNbParts>(dataBuffer+start, size, stream, dataToSort+start, !storedInRightPlaced);
+            }
+            else if(storedInRightPlaced){
+                CUDA_CHECK(cudaMemcpyAsync(dataToSort+start, dataBuffer+start, size * sizeof(T), cudaMemcpyDeviceToDevice, stream));
+            }
         }
     }
 
@@ -1403,132 +1488,9 @@ __host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream 
 }
 
 
-#include "tpool.hpp"
-
 template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito, int MinNbParts = 32, int MaxNbParts = 1024>
-__host__ void SortOnePar(ThreadPool& pool, T* dataToSort, const int nbValuesToSort, cudaStream_t stream = 0, T* dataBuffer = nullptr){
-    if(nbValuesToSort <= 32){
-        Sort_1Warp_SM_le32<T, TestIfSorted, FullSM><<<1,32,0,stream>>>(dataToSort, nbValuesToSort);
-        return;
-    }
-
-    int MaxThreadsPerBlock = DefaultNbThreadsPerBlock;
-    // TODO CUDA_CHECK(cudaDeviceGetAttribute(&MaxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, 0));
-    const int NOrPow2 = GreaterPowerOf2EqualOrLarger(nbValuesToSort);
-    if(NOrPow2 <= DefaultMaxBitoSortV2){
-        const int nbThreads = std::min(NOrPow2, MaxThreadsPerBlock);
-        if constexpr(ASyncCpyBito){
-            Sort_1Block_async_gt32_extsm_v2<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort);
-        }
-        else{
-            Sort_1Block_gt32_extsm_v2<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort);
-        }
-        return;
-    }
-
-    if(NOrPow2 <= ComputeDefaultMaxBitoSort<T>()){
-        const int nbThreads = std::min(NOrPow2, MaxThreadsPerBlock);
-        if constexpr(ASyncCpyBito){
-            Sort_1Block_async_gt32_extsm_v3<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort, NOrPow2);
-        }
-        else{
-            Sort_1Block_gt32_extsm_v3<T, TestIfSorted, FullSM><<<1,nbThreads,2*NOrPow2*sizeof(T),stream>>>(dataToSort, nbValuesToSort, NOrPow2);
-        }
-        return;
-    }
-
-    const int NbParts = std::min(MaxNbParts, std::max(MinNbParts, nbValuesToSort/MaxThreadsPerBlock));
-    const int NbPartsPow2 = GreaterPowerOf2EqualOrLarger(NbParts);
-
-    const bool allocatedDataBuffer = (dataBuffer == nullptr);
-    if(allocatedDataBuffer){
-        CUDA_CHECK(cudaMallocAsync(&dataBuffer, nbValuesToSort * sizeof(T), stream));
-    }
-
-    T* pivots = nullptr;
-    CUDA_CHECK(cudaMallocAsync(&pivots, NbParts * sizeof(T), stream));
-    CUDA_CHECK(cudaMemsetAsync(pivots, 0, NbParts * sizeof(T), stream));
-
-    Sort_core_buildPivots<T, MaxNbParts, TestIfSorted, FullSM><<<1, NbPartsPow2, 0, stream>>>(dataToSort, nbValuesToSort, pivots, NbParts);
-
-    int* counterParts = nullptr;
-    CUDA_CHECK(cudaMallocAsync(&counterParts, (NbParts+2) * sizeof(int), stream));
-    CUDA_CHECK(cudaMemsetAsync(counterParts, 0, (NbParts+2) * sizeof(int), stream));
-
-    const int nbThreadBlock = (nbValuesToSort+MaxThreadsPerBlock-1)/MaxThreadsPerBlock;
-
-    CountParts_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock, 0, stream >>>(dataToSort, nbValuesToSort, pivots, counterParts+2, NbParts);
-
-    BuildPrefix_SM<int, MaxNbParts><<<1,NbParts,0,stream>>>(counterParts+2, NbParts);
-
-    MoveElements_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock,0,stream >>>(dataToSort, nbValuesToSort,
-                                            pivots,
-                                            counterParts+1,
-                                            dataBuffer, NbParts);
-
-    int pivotsHost[NbParts];
-    CUDA_CHECK(cudaMemcpyAsync(pivotsHost, pivots, NbParts * sizeof(int), cudaMemcpyDeviceToHost, stream));
-
-    CUDA_CHECK(cudaMemcpyAsync(dataToSort, dataBuffer, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice, stream));
-    CUDA_CHECK(cudaFreeAsync(pivots, stream));
-
-    int counterPartsHost[NbParts+1];
-    CUDA_CHECK(cudaMemcpyAsync(counterPartsHost, counterParts, (NbParts + 1) * sizeof(int), cudaMemcpyDeviceToHost, stream));
-
-    cudaStream_t asyncSorts[NbParts];
-    for(int idxPart = 0 ; idxPart < NbParts ; idxPart++){
-        CUDA_CHECK(cudaStreamCreateWithFlags(&asyncSorts[idxPart], cudaStreamNonBlocking));
-    }
-
-    // We need counterPartsHost and that sortPartitions is over
-    CUDA_CHECK(cudaFreeAsync(counterParts, stream));  
-    CUDA_CHECK(cudaStreamSynchronize(stream));  
-
-    auto g = pool.make_group();
-
-    for(int idxPart = 0 ; idxPart < NbParts ; idxPart++){
-        const int start = counterPartsHost[idxPart];
-        const int end = counterPartsHost[idxPart+1];
-        const int size = end-start;
-        if(size > ComputeDefaultMaxBitoSort<T>()
-                && (idxPart == NbParts-1 || getNextVal(pivotsHost[idxPart]) < pivotsHost[idxPart+1])){
-            g.run([&, idxPart, start, size]
-            {
-                SortOnePar<T, TestIfSorted, FullSM, ASyncCpyBito, MinNbParts, MaxNbParts>(pool, dataToSort+start, size, asyncSorts[idxPart], dataBuffer+start);
-            });
-        }
-        else if(size <= ComputeDefaultMaxBitoSort<T>() && size > 0){
-            g.run([&, idxPart, start, size]
-            {
-                const int NOrPow2Part = GreaterPowerOf2EqualOrLarger(size);
-                SortOnePartition<T, TestIfSorted, FullSM, ASyncCpyBito><<< 1, MaxThreadsPerBlock, NOrPow2Part*2*sizeof(T), asyncSorts[idxPart]>>>(dataToSort+start, size);
-            });
-            // const int nbThreadsPart = std::min(NOrPow2Part, MaxThreadsPerBlock);
-            // if constexpr(ASyncCpyBito){
-            //     Sort_1Block_async_gt32_extsm_v3<T, TestIfSorted, FullSM><<<1,nbThreadsPart,2*NOrPow2Part*sizeof(T),stream>>>(dataToSort+start, size, NOrPow2Part);
-            // }
-            // else{
-            //     Sort_1Block_gt32_extsm_v3<T, TestIfSorted, FullSM><<<1,nbThreadsPart,2*NOrPow2Part*sizeof(T),stream>>>(dataToSort+start, size, NOrPow2Part);
-            // }
-        }
-    }
-
-    g.wait();
-
-    for(int idxPart = 0 ; idxPart < NbParts ; idxPart++){
-        CUDA_CHECK(cudaStreamSynchronize(asyncSorts[idxPart]));
-        CUDA_CHECK(cudaStreamDestroy(asyncSorts[idxPart]));
-    } 
-
-    if(allocatedDataBuffer){
-        CUDA_CHECK(cudaFreeAsync(dataBuffer, stream));
-    }
-}
-
-
-template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito, int MinNbParts = 32, int MaxNbParts = 1024>
-__host__ void SortOne(ThreadPool& pool, T* dataToSort, const int nbValuesToSort, cudaStream_t stream = 0, T* dataBuffer = nullptr){
-    SortOnePar<T, TestIfSorted, FullSM, ASyncCpyBito, MinNbParts, MaxNbParts>(pool, dataToSort, nbValuesToSort, stream, dataBuffer);
+__host__ void Sort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream = 0){
+    SortCore<T, TestIfSorted, FullSM, ASyncCpyBito, MinNbParts, MaxNbParts>(dataToSort, nbValuesToSort, stream, nullptr, true);
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -1641,17 +1603,17 @@ __global__ void SortChunks(T* dataToSort, const int nbValuesToSort){
         const int end = min(start+MaxValuesToSort, nbValuesToSort);
         const int size = end-start;
         if(size <= 32){
-            Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(dataToSort+start, size);
+            Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(dataToSort+start, dataToSort+start, size);
         }
         else if(size <= DefaultMaxBitoSortV2){
             const int NOrPow2 = GreaterPowerOf2EqualOrLarger(size);
             assert(NOrPow2 <= DefaultMaxBitoSortV2);
-            Sort_1Block_gt32_d_extsm_v2<T, TestIfSorted, FullSM>(dataToSort+start, size);
+            Sort_1Block_gt32_d_extsm_v2<T, TestIfSorted, FullSM>(dataToSort+start, dataToSort+start, size);
         }
         else if(size <= MaxValuesToSort){
             const int NOrPow2 = GreaterPowerOf2EqualOrLarger(size);
             assert(NOrPow2 <= MaxValuesToSort);
-            Sort_1Block_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort+start, size, NOrPow2);
+            Sort_1Block_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort+start, dataToSort+start, size, NOrPow2);
         }
     }
 }
