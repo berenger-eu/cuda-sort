@@ -603,6 +603,7 @@ void testLargeHybrid() {
 
 int main() {
     if(true){
+        std::cout << "Testing small bitonic sort" << std::endl;
         for_bool([&](auto bool_constant_testsorted) {
             constexpr bool TestSorted = bool_constant_testsorted.value;
             for_bool([&](auto bool_constant_fullsm) {
@@ -621,6 +622,7 @@ int main() {
         });
     }
     if(true){
+        std::cout << "Testing large bitonic sort" << std::endl;
         for_bool([&](auto bool_constant_testsorted) {
             constexpr bool TestSorted = bool_constant_testsorted.value;
             for_bool([&](auto bool_constant_fullsm) {
@@ -637,6 +639,7 @@ int main() {
         testV3<IntAndData, TestSorted, FullSM, AsynCpy>();
     }
     if(true){
+        std::cout << "Testing large bitonic sort" << std::endl;
         for_bool([&](auto bool_constant_testsorted) {
             constexpr bool TestSorted = bool_constant_testsorted.value;
             for_bool([&](auto bool_constant_fullsm) {
@@ -654,10 +657,12 @@ int main() {
         testLarge<IntAndData, TestSorted, FullSM, AsynCpy>();
     }
     if(true){
+        std::cout << "Testing large merge sort" << std::endl;
         testLargeMerge<int, false, false>();
         testLargeMerge<IntAndData, false, true>();
     }
     if(true){
+        std::cout << "Testing large hybrid sort" << std::endl;
         testLargeHybrid<int>();
         testLargeHybrid<IntAndData>();
     }
