@@ -1626,27 +1626,46 @@ __host__ void SortMerge(
     const int nbThreadsPerBlockForMerge = DefaultNbThreadsPerBlock,
     cudaStream_t stream = 0,
     T* externalBuffer = nullptr,
-    size_t externalBufferElems = 0
+    size_t externalBufferElems = 0,
+    bool storedInRightPlaced = true
 ){
     // MaxValuesToSort must be power of 2
     static_assert(((MaxValuesToSort - 1) & MaxValuesToSort) == 0, "MaxValuesToSort must be a power of 2");
 
     auto ceil_div = [](int a, int b) -> int { return (a + b - 1) / b; };
 
-    if (nbValuesToSort <= 1) return;
+    if (nbValuesToSort <= 1){
+        if(storedInRightPlaced == false){
+            assert(externalBuffer != nullptr);
+            CUDA_CHECK(cudaMemcpyAsync(externalBuffer, dataToSort, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice, stream));
+        }
+        return;
+    }
 
     // Petits cas
     if (nbValuesToSort <= 32) {
-        Sort_1Warp_SM_le32<T, TestIfSorted, FullSM>
-            <<<1, 32, 0, stream>>>(dataToSort, nbValuesToSort);
+        if(storedInRightPlaced == false){
+            Sort_1Warp_SM_le32_outofplace<T, TestIfSorted, FullSM>
+                <<<1, 32, 0, stream>>>(dataToSort, externalBuffer, nbValuesToSort);
+        }
+        else{
+            Sort_1Warp_SM_le32<T, TestIfSorted, FullSM>
+                <<<1, 32, 0, stream>>>(dataToSort, nbValuesToSort);
+        }
         return;
     }
 
     const int NOrPow2 = GreaterPowerOf2EqualOrLarger(nbValuesToSort);
     if (NOrPow2 <= ComputeDefaultMaxBitoSort<T>()) {
         const int nbThreads = std::min(NOrPow2, DefaultNbThreadsPerBlock);
-        Sort_1Block_gt32_extsm_v3<T, TestIfSorted, FullSM>
-            <<<1, nbThreads, 2 * NOrPow2 * sizeof(T), stream>>>(dataToSort, nbValuesToSort, NOrPow2);
+        if(storedInRightPlaced == false){
+            Sort_1Block_gt32_extsm_v3_outofplace<T, TestIfSorted, FullSM>
+                <<<1, nbThreads, 2 * NOrPow2 * sizeof(T), stream>>>(dataToSort, externalBuffer, nbValuesToSort, NOrPow2);
+        }
+        else{
+            Sort_1Block_gt32_extsm_v3<T, TestIfSorted, FullSM>
+                <<<1, nbThreads, 2 * NOrPow2 * sizeof(T), stream>>>(dataToSort, nbValuesToSort, NOrPow2);
+        }
         return;
     }
 
@@ -1690,7 +1709,7 @@ __host__ void SortMerge(
         std::swap(in, out);
     }
 
-    if (in != dataToSort) {
+    if (in != dataToSort && storedInRightPlaced) {
         CUDA_CHECK(cudaMemcpyAsync(
             dataToSort, in,
             nbValuesToSort * sizeof(T),
@@ -1714,7 +1733,7 @@ __host__ void HybridSort(T* dataToSort, const int nbValuesToSort, cudaStream_t s
 
     // If the array is small enough, we use SortMerge
     if (nbValuesToSort <= MaxValuesToSort * 16) {
-        SortMerge<T, MaxValuesToSort, TestIfSorted, FullSM>(dataToSort, nbValuesToSort, DefaultNbThreadsPerBlock, stream);
+        SortMerge<T, MaxValuesToSort, TestIfSorted, FullSM>(dataToSort, nbValuesToSort, DefaultNbThreadsPerBlock, stream, nullptr, 0, true);
         return;
     }
 
@@ -1753,7 +1772,7 @@ __host__ void HybridSort(T* dataToSort, const int nbValuesToSort, cudaStream_t s
     int pivotsHost[NbParts];
     CUDA_CHECK(cudaMemcpyAsync(pivotsHost, pivots, NbParts * sizeof(int), cudaMemcpyDeviceToHost, stream));
 
-    CUDA_CHECK(cudaMemcpyAsync(dataToSort, dataBuffer, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice, stream));
+    // TODO CUDA_CHECK(cudaMemcpyAsync(dataToSort, dataBuffer, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice, stream));
     CUDA_CHECK(cudaFreeAsync(pivots, stream));
 
     int counterPartsHost[NbParts+1];
@@ -1774,7 +1793,7 @@ __host__ void HybridSort(T* dataToSort, const int nbValuesToSort, cudaStream_t s
         const int start = counterPartsHost[idxPart];
         const int end = counterPartsHost[idxPart+1];
         const int size = end-start;
-        SortMerge<T, ComputeDefaultMaxBitoSort<T>(), TestIfSorted, FullSM>(dataToSort+start, size, DefaultNbThreadsPerBlock, asyncSorts[idxPart % kStreams], dataBuffer+start, size);
+        SortMerge<T, ComputeDefaultMaxBitoSort<T>(), TestIfSorted, FullSM>(dataBuffer+start, size, DefaultNbThreadsPerBlock, asyncSorts[idxPart % kStreams], dataToSort+start, size, false);
     }
 
     for(int idxPart = 0 ; idxPart < kStreams ; idxPart++){
