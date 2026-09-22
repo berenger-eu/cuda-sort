@@ -1225,50 +1225,50 @@ __global__ void BuildPrefix_SM( IndexType* prefixTree, const IndexType inSize){
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
 
-template <typename T, int MaxParts, bool TestIfSorted, bool FullSM>
+template <typename T, int MaxParts, int kOver, bool TestIfSorted, bool FullSM>
 __global__ void Sort_core_buildPivots(T* __restrict__ dataToSort, const int nbValuesToSort, T* __restrict__ pivots, const int nbParts){
     // We copy values from the array to build the partition
     assert(gridDim.x == 1);
     assert(nbParts <= MaxParts);
     assert(4 <= nbParts);
     assert(32 <= blockDim.x);
-    static_assert(((MaxParts - 1) & MaxParts) == 0, "MaxParts must be a power of 2");
-    __shared__ T localPivots[MaxParts];
+    assert(nbValuesToSort > 0);
+    static_assert(MaxParts > 0 && ((MaxParts - 1) & MaxParts) == 0, "MaxParts must be a power of 2");
+
+    const int nbSamples = nbParts * kOver;
+    const int sampleStep = max(1, nbValuesToSort / nbSamples);
+
+    __shared__ T localPivots[MaxParts * kOver];
     
     if(threadIdx.x < 1){
         localPivots[threadIdx.x] = my_numeric_limits_min<T>();
     } 
-    for(int idx = threadIdx.x + 1 ; idx < nbParts ; idx += blockDim.x){
-        const int step = nbValuesToSort/nbParts;
-        localPivots[idx] = dataToSort[min(nbValuesToSort-1, step*idx)];
+    for(int idx = threadIdx.x + 1 ; idx < nbSamples ; idx += blockDim.x){
+        localPivots[idx] = dataToSort[min(nbValuesToSort-1, sampleStep*(idx-1))];
     }
-    for(int idx = threadIdx.x + nbParts ; idx < MaxParts ; idx += blockDim.x){
-        localPivots[idx] = my_numeric_limits_max<T>();
-    } 
     __syncthreads();
 
-    if(nbParts <= 32){
-        Core_Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(localPivots, nbParts);
+    if(nbSamples <= 32){
+        Core_Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(localPivots, nbSamples);
         // There is a syncthread in the function
     }
-    else if(nbParts <= 512){
-        Core_Sort_1Block_SM_gt32_d<T, TestIfSorted, FullSM>(localPivots, nbParts);
+    else if(nbSamples <= 512){
+        Core_Sort_1Block_SM_gt32_d<T, TestIfSorted, FullSM>(localPivots, nbSamples);
         // There is a syncthread in the function
     }
     else {
-        __shared__ T buffer[MaxParts];
-        Core_Sort_1Block_SM_gt32_d_v3<T, TestIfSorted, FullSM>(localPivots, nbParts,
-                                                            buffer, MaxParts);
+        __shared__ T buffer[MaxParts * kOver];
+        Core_Sort_1Block_SM_gt32_d_v3<T, TestIfSorted, FullSM>(localPivots, nbSamples,
+                                                            buffer, MaxParts * kOver);
         // There is a syncthread in the function
     }
     
-    if(threadIdx.x == 0){
-        localPivots[nbParts-1] = getNextVal(localPivots[nbParts-2]);
+    for(int idx = threadIdx.x ; idx < nbParts ; idx += blockDim.x){
+        pivots[idx] = localPivots[idx * kOver];
     }
     __syncthreads();
-
-    for(int idx = threadIdx.x ; idx < nbParts ; idx += blockDim.x){
-        pivots[idx] = localPivots[idx];
+    if(threadIdx.x == 0){
+        pivots[nbParts-1] = getNextVal(localPivots[nbSamples-1]);
     }
     __syncthreads();
 
@@ -1418,7 +1418,11 @@ __host__ void SortCore(T* dataToSort, const int nbValuesToSort, cudaStream_t str
     CUDA_CHECK(cudaMemsetAsync(pivots, 0, NbParts * sizeof(T), stream));
 
     const int NbPartsPow2Or32 = std::max(32, NbPartsPow2);
-    Sort_core_buildPivots<T, MaxNbParts, TestIfSorted, FullSM><<<1, NbPartsPow2Or32, 0, stream>>>(dataToSort, nbValuesToSort, pivots, NbParts);
+    const int kOver = 2;
+    if(NbPartsPow2Or32 * kOver <= MaxThreadsPerBlock)
+        Sort_core_buildPivots<T, MaxNbParts, kOver, TestIfSorted, FullSM><<<1, NbPartsPow2Or32*kOver, 0, stream>>>(dataToSort, nbValuesToSort, pivots, NbParts);
+    else
+        Sort_core_buildPivots<T, MaxNbParts, 1, TestIfSorted, FullSM><<<1, MaxThreadsPerBlock, 0, stream>>>(dataToSort, nbValuesToSort, pivots, NbParts);
 
     int* counterParts = nullptr;
     CUDA_CHECK(cudaMallocAsync(&counterParts, (NbParts+2) * sizeof(int), stream));
@@ -1586,11 +1590,15 @@ __global__ void mergeKernel(
     int iA_end = mergePathDiag(shA, localA, shB, localB, t1);
     int jB_end = t1 - iA_end;
 
+    __shared__ T sout[TILE];
     // Petite optimisation : garde les valeurs en registres
     for (int k = t0; k < t1; ++k) {
         bool takeA = (jB >= localB) || (iA < localA && shA[iA] <= shB[jB]);
-        out[k] = takeA ? shA[iA++] : shB[jB++];
+        sout[k] = takeA ? shA[iA++] : shB[jB++];
     }
+
+    __syncthreads();
+    for (int i = threadIdx.x; i < localL; i += blockDim.x) out[i] = sout[i];
 }
 
 
@@ -1619,11 +1627,11 @@ __global__ void SortChunks(T* dataToSort, const int nbValuesToSort){
 }
 
 
-template <typename T, int MaxValuesToSort = ComputeDefaultMaxBitoSort<T>(), bool TestIfSorted = false, bool FullSM = false>
+template <typename T, int MaxValuesToSort = ComputeDefaultMaxBitoSort<T>()/2, bool TestIfSorted = false, bool FullSM = false>
 __host__ void SortMerge(
     T* dataToSort,
     const int nbValuesToSort,
-    const int nbThreadsPerBlockForMerge = DefaultNbThreadsPerBlock,
+    const int nbThreadsPerBlockForMerge = std::min(DefaultNbThreadsPerBlock, MaxValuesToSort/16),
     cudaStream_t stream = 0,
     T* externalBuffer = nullptr,
     size_t externalBufferElems = 0,
@@ -1738,7 +1746,7 @@ __host__ void HybridSort(T* dataToSort, const int nbValuesToSort, cudaStream_t s
     }
 
     // Otherwise, we multipartition it and then sort each partition with merge sort
-    const int NbParts = std::min(MaxNbParts, (nbValuesToSort/ComputeDefaultMaxBitoSort<T>())+1);
+    const int NbParts = std::min(MaxNbParts, (nbValuesToSort/MaxValuesToSort)+1);
     const int NbPartsPow2 = GreaterPowerOf2EqualOrLarger(NbParts);
 
     const bool allocatedDataBuffer = (dataBuffer == nullptr);
@@ -1750,14 +1758,18 @@ __host__ void HybridSort(T* dataToSort, const int nbValuesToSort, cudaStream_t s
     CUDA_CHECK(cudaMallocAsync(&pivots, NbParts * sizeof(T), stream));
     CUDA_CHECK(cudaMemsetAsync(pivots, 0, NbParts * sizeof(T), stream));
 
+    const int MaxThreadsPerBlock = DefaultNbThreadsPerBlock;
     const int NbPartsPow2Or32 = std::max(32, NbPartsPow2);
-    Sort_core_buildPivots<T, MaxNbParts, TestIfSorted, FullSM><<<1, NbPartsPow2Or32, 0, stream>>>(dataToSort, nbValuesToSort, pivots, NbParts);
+    const int kOver = 2;
+    if(NbPartsPow2Or32*kOver <= MaxThreadsPerBlock)
+        Sort_core_buildPivots<T, MaxNbParts, kOver, TestIfSorted, FullSM><<<1, NbPartsPow2Or32*kOver, 0, stream>>>(dataToSort, nbValuesToSort, pivots, NbParts);
+    else
+        Sort_core_buildPivots<T, MaxNbParts, 1, TestIfSorted, FullSM><<<1, MaxThreadsPerBlock, 0, stream>>>(dataToSort, nbValuesToSort, pivots, NbParts);
 
     int* counterParts = nullptr;
     CUDA_CHECK(cudaMallocAsync(&counterParts, (NbParts+2) * sizeof(int), stream));
     CUDA_CHECK(cudaMemsetAsync(counterParts, 0, (NbParts+2) * sizeof(int), stream));
 
-    const int MaxThreadsPerBlock = DefaultNbThreadsPerBlock;
     const int nbThreadBlock = (nbValuesToSort+MaxThreadsPerBlock-1)/MaxThreadsPerBlock;
 
     CountParts_Grid<T, MaxNbParts><<< nbThreadBlock, MaxThreadsPerBlock, 0, stream >>>(dataToSort, nbValuesToSort, pivots, counterParts+2, NbParts);
@@ -1769,8 +1781,8 @@ __host__ void HybridSort(T* dataToSort, const int nbValuesToSort, cudaStream_t s
                                             counterParts+1,
                                             dataBuffer, NbParts);
 
-    int pivotsHost[NbParts];
-    CUDA_CHECK(cudaMemcpyAsync(pivotsHost, pivots, NbParts * sizeof(int), cudaMemcpyDeviceToHost, stream));
+    T pivotsHost[NbParts];
+    CUDA_CHECK(cudaMemcpyAsync(pivotsHost, pivots, NbParts * sizeof(T), cudaMemcpyDeviceToHost, stream));
 
     // TODO CUDA_CHECK(cudaMemcpyAsync(dataToSort, dataBuffer, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice, stream));
     CUDA_CHECK(cudaFreeAsync(pivots, stream));
@@ -1793,7 +1805,7 @@ __host__ void HybridSort(T* dataToSort, const int nbValuesToSort, cudaStream_t s
         const int start = counterPartsHost[idxPart];
         const int end = counterPartsHost[idxPart+1];
         const int size = end-start;
-        SortMerge<T, ComputeDefaultMaxBitoSort<T>(), TestIfSorted, FullSM>(dataBuffer+start, size, DefaultNbThreadsPerBlock, asyncSorts[idxPart % kStreams], dataToSort+start, size, false);
+        SortMerge<T, MaxValuesToSort, TestIfSorted, FullSM>(dataBuffer+start, size, DefaultNbThreadsPerBlock, asyncSorts[idxPart % kStreams], dataToSort+start, size, false);
     }
 
     for(int idxPart = 0 ; idxPart < kStreams ; idxPart++){
