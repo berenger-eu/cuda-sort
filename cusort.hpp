@@ -1,5 +1,5 @@
-#ifndef CUSORT_HPP
-#define CUSORT_HPP
+#ifndef CUSORTV2_HPP
+#define CUSORTV2_HPP
 
 #include <algorithm>
 #include <iostream>
@@ -128,7 +128,7 @@ __host__ __device__ __forceinline__  constexpr T my_numeric_limits_min(){
 template <typename T>
 __device__ __forceinline__ T getNextVal(const T& val){
     if constexpr (std::is_same<T, int>::value){
-        return val + 1;
+        return val == my_numeric_limits_max<T>() ? val : val + 1;
     }
     else if constexpr(std::is_same<T, float>::value){
         return std::nextafter(val, CUDART_INF_F);
@@ -144,7 +144,7 @@ __device__ __forceinline__ T getNextVal(const T& val){
 template <typename T>
 __device__ __forceinline__ T getPrevVal(const T& val){
     if constexpr (std::is_same<T, int>::value){
-        return val - 1;
+        return val == my_numeric_limits_min<T>() ? val : val - 1;
     }
     else if constexpr(std::is_same<T, float>::value){
         return std::nextafter(val, -CUDART_INF_F);
@@ -162,7 +162,7 @@ __device__ __forceinline__ T getPrevVal(const T& val){
 template <typename T>
 inline __host__ T getNextVal(const T& val){
     if constexpr (std::is_same<T, int>::value){
-        return val + 1;
+        return val == my_numeric_limits_max<T>() ? val : val + 1;
     }
     else if constexpr(std::is_same<T, float>::value){
         return std::nextafter(val, std::numeric_limits<float>::infinity());
@@ -178,7 +178,7 @@ inline __host__ T getNextVal(const T& val){
 template <typename T>
 inline __host__ T getPrevVal(const T& val){
     if constexpr (std::is_same<T, int>::value){
-        return val - 1;
+        return val == my_numeric_limits_min<T>() ? val : val - 1;
     }
     else if constexpr(std::is_same<T, float>::value){
         return std::nextafter(val, -std::numeric_limits<float>::infinity());
@@ -1570,9 +1570,11 @@ __global__ void mergeKernel(
     const int localB = b1 - b0;
     const int localL = localA + localB; // == D1_chunk - D0_chunk <= TILE
 
-    // Shared layout FIXE : A puis B (pas de bufM)
-    __shared__ T shA[TILE];
-    __shared__ T shB[TILE];
+    // A and B together contain at most TILE values.  Keeping two TILE-sized
+    // arrays needlessly reduced occupancy (especially for double).
+    __shared__ T shInputs[TILE];
+    T* shA = shInputs;
+    T* shB = shInputs + localA;
 
     for (int i = threadIdx.x; i < localA; i += blockDim.x) shA[i] = runA[a0 + i];
     for (int i = threadIdx.x; i < localB; i += blockDim.x) shB[i] = runB[b0 + i];
@@ -1587,9 +1589,6 @@ __global__ void mergeKernel(
 
     // Merge séquentiel du segment et STORE DIRECT en global
     // (pas de bufM, pas de sync finale)
-    int iA_end = mergePathDiag(shA, localA, shB, localB, t1);
-    int jB_end = t1 - iA_end;
-
     __shared__ T sout[TILE];
     // Petite optimisation : garde les valeurs en registres
     for (int k = t0; k < t1; ++k) {
@@ -1641,6 +1640,13 @@ __host__ void SortMerge(
     static_assert(((MaxValuesToSort - 1) & MaxValuesToSort) == 0, "MaxValuesToSort must be a power of 2");
 
     auto ceil_div = [](int a, int b) -> int { return (a + b - 1) / b; };
+
+    // When the caller requests an out-of-place result, externalBuffer is the
+    // destination, not merely optional scratch storage.
+    if (!storedInRightPlaced) {
+        assert(externalBuffer != nullptr);
+        assert(externalBufferElems >= static_cast<size_t>(nbValuesToSort));
+    }
 
     if (nbValuesToSort <= 1){
         if(storedInRightPlaced == false){
@@ -1717,9 +1723,10 @@ __host__ void SortMerge(
         std::swap(in, out);
     }
 
-    if (in != dataToSort && storedInRightPlaced) {
+    T* requestedOutput = storedInRightPlaced ? dataToSort : externalBuffer;
+    if (in != requestedOutput) {
         CUDA_CHECK(cudaMemcpyAsync(
-            dataToSort, in,
+            requestedOutput, in,
             nbValuesToSort * sizeof(T),
             cudaMemcpyDeviceToDevice,
             stream
@@ -1739,9 +1746,13 @@ template <typename T, int MaxValuesToSort = 2048, int MaxNbParts = 512, bool Tes
 __host__ void HybridSort(T* dataToSort, const int nbValuesToSort, cudaStream_t stream = 0, T* dataBuffer = nullptr){
     static_assert(((MaxValuesToSort - 1) & MaxValuesToSort) == 0, "MaxValuesToSort must be a power of 2");
 
+    constexpr int MaxThreadsPerBlock = DefaultNbThreadsPerBlock;
+    constexpr int MergeThreadsPerBlock =
+        std::min(DefaultNbThreadsPerBlock, MaxValuesToSort/16);
+
     // If the array is small enough, we use SortMerge
     if (nbValuesToSort <= MaxValuesToSort * 16) {
-        SortMerge<T, MaxValuesToSort, TestIfSorted, FullSM>(dataToSort, nbValuesToSort, DefaultNbThreadsPerBlock, stream, nullptr, 0, true);
+        SortMerge<T, MaxValuesToSort, TestIfSorted, FullSM>(dataToSort, nbValuesToSort, MergeThreadsPerBlock, stream, nullptr, 0, true);
         return;
     }
 
@@ -1758,7 +1769,6 @@ __host__ void HybridSort(T* dataToSort, const int nbValuesToSort, cudaStream_t s
     CUDA_CHECK(cudaMallocAsync(&pivots, NbParts * sizeof(T), stream));
     CUDA_CHECK(cudaMemsetAsync(pivots, 0, NbParts * sizeof(T), stream));
 
-    const int MaxThreadsPerBlock = DefaultNbThreadsPerBlock;
     const int NbPartsPow2Or32 = std::max(32, NbPartsPow2);
     const int kOver = 2;
     if(NbPartsPow2Or32*kOver <= MaxThreadsPerBlock)
@@ -1781,36 +1791,71 @@ __host__ void HybridSort(T* dataToSort, const int nbValuesToSort, cudaStream_t s
                                             counterParts+1,
                                             dataBuffer, NbParts);
 
-    T pivotsHost[NbParts];
-    CUDA_CHECK(cudaMemcpyAsync(pivotsHost, pivots, NbParts * sizeof(T), cudaMemcpyDeviceToHost, stream));
-
-    // TODO CUDA_CHECK(cudaMemcpyAsync(dataToSort, dataBuffer, nbValuesToSort * sizeof(T), cudaMemcpyDeviceToDevice, stream));
     CUDA_CHECK(cudaFreeAsync(pivots, stream));
 
-    int counterPartsHost[NbParts+1];
-    CUDA_CHECK(cudaMemcpyAsync(counterPartsHost, counterParts, (NbParts + 1) * sizeof(int), cudaMemcpyDeviceToHost, stream));
+    std::vector<int> counterPartsHost(NbParts+1);
+    CUDA_CHECK(cudaMemcpyAsync(counterPartsHost.data(), counterParts,
+                               (NbParts + 1) * sizeof(int),
+                               cudaMemcpyDeviceToHost, stream));
 
-    // We create NbParts streams to sort each partition
-    constexpr int kStreams = 8;
-    cudaStream_t asyncSorts[kStreams];
-    for(int idxPart = 0 ; idxPart < kStreams ; idxPart++){
-        CUDA_CHECK(cudaStreamCreateWithFlags(&asyncSorts[idxPart], cudaStreamNonBlocking));
-    }
-
-    // We need counterPartsHost and that sortPartitions is over
+    // The host needs partition boundaries. This remains the principal
+    // synchronization point of the sample-sort path.
     CUDA_CHECK(cudaStreamSynchronize(stream));  
-    CUDA_CHECK(cudaFreeAsync(counterParts, stream));  
 
+    int maxSmallPartition = 0;
+    std::vector<int> largePartitions;
     for(int idxPart = 0 ; idxPart < NbParts ; idxPart++){
         const int start = counterPartsHost[idxPart];
         const int end = counterPartsHost[idxPart+1];
         const int size = end-start;
-        SortMerge<T, MaxValuesToSort, TestIfSorted, FullSM>(dataBuffer+start, size, DefaultNbThreadsPerBlock, asyncSorts[idxPart % kStreams], dataToSort+start, size, false);
+        if (size <= ComputeDefaultMaxBitoSort<T>()) {
+            maxSmallPartition = std::max(maxSmallPartition, size);
+        }
+        else {
+            largePartitions.push_back(idxPart);
+        }
     }
 
-    for(int idxPart = 0 ; idxPart < kStreams ; idxPart++){
-        CUDA_CHECK(cudaStreamDestroy(asyncSorts[idxPart]));
+    // This replaces up to NbParts independent host-side SortMerge calls by a
+    // single grid launch. With the chosen number of buckets, this is normally
+    // the common path.
+    if (maxSmallPartition > 0) {
+        const int workingValues = GreaterPowerOf2EqualOrLarger(maxSmallPartition);
+        SortPartitions_outofplace<T, TestIfSorted, FullSM, false>
+            <<<NbParts, MaxThreadsPerBlock,
+               2 * workingValues * sizeof(T), stream>>>(
+                dataBuffer, dataToSort, nbValuesToSort, counterParts, NbParts);
     }
+
+    // Only genuinely oversized buckets need merge sort. A small stream pool
+    // lets those independent ranges overlap. Events reconnect all work to the
+    // caller's stream, so neither the scratch buffer nor the output can race.
+    const int nbSortStreams = std::min<int>(8, largePartitions.size());
+    std::vector<cudaStream_t> asyncSorts(nbSortStreams);
+    std::vector<cudaEvent_t> sortDone(nbSortStreams);
+    for(int idxStream = 0 ; idxStream < nbSortStreams ; ++idxStream){
+        CUDA_CHECK(cudaStreamCreateWithFlags(&asyncSorts[idxStream], cudaStreamNonBlocking));
+        CUDA_CHECK(cudaEventCreateWithFlags(&sortDone[idxStream], cudaEventDisableTiming));
+    }
+
+    for(size_t idxLarge = 0 ; idxLarge < largePartitions.size() ; ++idxLarge){
+        const int idxPart = largePartitions[idxLarge];
+        const int start = counterPartsHost[idxPart];
+        const int size = counterPartsHost[idxPart+1] - start;
+        const int idxStream = static_cast<int>(idxLarge % nbSortStreams);
+        SortMerge<T, MaxValuesToSort, TestIfSorted, FullSM>(
+            dataBuffer+start, size, MergeThreadsPerBlock,
+            asyncSorts[idxStream], dataToSort+start, size, false);
+    }
+
+    for(int idxStream = 0 ; idxStream < nbSortStreams ; ++idxStream){
+        CUDA_CHECK(cudaEventRecord(sortDone[idxStream], asyncSorts[idxStream]));
+        CUDA_CHECK(cudaStreamWaitEvent(stream, sortDone[idxStream], 0));
+        CUDA_CHECK(cudaStreamDestroy(asyncSorts[idxStream]));
+        CUDA_CHECK(cudaEventDestroy(sortDone[idxStream]));
+    }
+
+    CUDA_CHECK(cudaFreeAsync(counterParts, stream));
 
     if(allocatedDataBuffer){
         CUDA_CHECK(cudaFreeAsync(dataBuffer, stream));
