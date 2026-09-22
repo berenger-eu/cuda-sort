@@ -1,2 +1,2 @@
-module load tools/git compiler/gcc/11.2.0 compiler/cuda/12.3 build/cmake/3.21.3
+module load git/2.54.0 gcc-toolchain/12.5.0 cuda-toolkit/12.9.1 cmake/4.1.3
 
