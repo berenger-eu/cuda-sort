@@ -191,7 +191,7 @@ void benmarkSortLargeHybrid(const std::string& inBasename){
             for(int idxInitData = 0 ; idxInitData < NB_INITS ; ++idxInitData){
                 for(int idxSize = nbElements ; idxSize <= nbElements ; idxSize *= 2){
                     for(int idxLoop = 0 ; idxLoop < NbLoops ; ++idxLoop){
-                        for_int_pow2<16, 512+1>([&](auto NbParts){
+                        for_int_pow2<32, 512+1>([&](auto NbParts){
                             for_int_pow2<256, ComputeDefaultMaxBitoSort<int>()+1>([&](auto MaxValuesToSort){
                                 std::cout << "idxInitData: " << idxInitData << " idxSize: " << idxSize << " idxLoop: " << idxLoop << std::endl;
 
