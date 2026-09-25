@@ -1,8 +1,9 @@
-#ifndef CUSORT_V2_HPP
-#define CUSORT_V2_HPP
+#ifndef CUSORT_V3_HPP
+#define CUSORT_V3_HPP
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <iostream>
 #include <random>
 #include <type_traits>
@@ -74,17 +75,24 @@ class CuSortWorkspace {
     T* pivots_ = nullptr;
     int* counters_ = nullptr;
     int* blockOffsets_ = nullptr;
+    int* blockUniform_ = nullptr;
+    int* uniformParts_ = nullptr;
+    int* activeNbParts_ = nullptr;
     size_t valuesCapacity_ = 0;
     int persistentBlocks_ = 1;
-    std::vector<T> hostPivots_;
     std::vector<int> hostCounters_;
+    std::vector<int> hostUniformParts_;
     std::vector<int> hostLargePartitions_;
+    std::vector<cudaStream_t> sortStreams_;
+    std::vector<cudaEvent_t> sortDone_;
+    bool workerEventsRecorded_ = false;
 
 public:
     explicit CuSortWorkspace(size_t initialCapacity = 0,
-                             int blocksPerSM = 4)
-        : hostPivots_(MaxNbParts), hostCounters_(MaxNbParts + 1),
-          hostLargePartitions_(MaxNbParts) {
+                             int blocksPerSM = 4,
+                             int nbSortStreams = 8)
+        : hostCounters_(MaxNbParts + 1),
+          hostUniformParts_(MaxNbParts), hostLargePartitions_(MaxNbParts) {
         int device = 0;
         int multiprocessorCount = 1;
         CUDA_CHECK(cudaGetDevice(&device));
@@ -97,14 +105,34 @@ public:
         CUDA_CHECK(cudaMalloc(&blockOffsets_,
                               static_cast<size_t>(persistentBlocks_) *
                                   MaxNbParts * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&blockUniform_,
+                              static_cast<size_t>(persistentBlocks_) *
+                                  MaxNbParts * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&uniformParts_, MaxNbParts * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&activeNbParts_, sizeof(int)));
+        const int poolSize = std::max(1, nbSortStreams);
+        sortStreams_.resize(poolSize);
+        sortDone_.resize(poolSize);
+        for(int idx = 0 ; idx < poolSize ; ++idx){
+            CUDA_CHECK(cudaStreamCreateWithFlags(&sortStreams_[idx],
+                                                  cudaStreamNonBlocking));
+            CUDA_CHECK(cudaEventCreateWithFlags(&sortDone_[idx],
+                                                 cudaEventDisableTiming));
+        }
         if (initialCapacity) reserve(initialCapacity);
     }
 
     ~CuSortWorkspace() {
+        for(cudaStream_t worker : sortStreams_) cudaStreamSynchronize(worker);
+        for(cudaEvent_t event : sortDone_) cudaEventDestroy(event);
+        for(cudaStream_t worker : sortStreams_) cudaStreamDestroy(worker);
         if (valuesBuffer_) cudaFree(valuesBuffer_);
         if (pivots_) cudaFree(pivots_);
         if (counters_) cudaFree(counters_);
         if (blockOffsets_) cudaFree(blockOffsets_);
+        if (blockUniform_) cudaFree(blockUniform_);
+        if (uniformParts_) cudaFree(uniformParts_);
+        if (activeNbParts_) cudaFree(activeNbParts_);
     }
 
     CuSortWorkspace(const CuSortWorkspace&) = delete;
@@ -113,20 +141,36 @@ public:
     CuSortWorkspace(CuSortWorkspace&& other) noexcept
         : valuesBuffer_(other.valuesBuffer_), pivots_(other.pivots_),
           counters_(other.counters_), blockOffsets_(other.blockOffsets_),
+          blockUniform_(other.blockUniform_), uniformParts_(other.uniformParts_),
+          activeNbParts_(other.activeNbParts_),
           valuesCapacity_(other.valuesCapacity_),
           persistentBlocks_(other.persistentBlocks_),
-          hostPivots_(std::move(other.hostPivots_)),
           hostCounters_(std::move(other.hostCounters_)),
-          hostLargePartitions_(std::move(other.hostLargePartitions_)) {
+          hostUniformParts_(std::move(other.hostUniformParts_)),
+          hostLargePartitions_(std::move(other.hostLargePartitions_)),
+          sortStreams_(std::move(other.sortStreams_)),
+          sortDone_(std::move(other.sortDone_)),
+          workerEventsRecorded_(other.workerEventsRecorded_) {
         other.valuesBuffer_ = nullptr;
         other.pivots_ = nullptr;
         other.counters_ = nullptr;
         other.blockOffsets_ = nullptr;
+        other.blockUniform_ = nullptr;
+        other.uniformParts_ = nullptr;
+        other.activeNbParts_ = nullptr;
         other.valuesCapacity_ = 0;
+        other.workerEventsRecorded_ = false;
+        other.sortStreams_.clear();
+        other.sortDone_.clear();
     }
 
     void reserve(size_t capacity) {
         if (capacity <= valuesCapacity_) return;
+        if(workerEventsRecorded_){
+            for(cudaStream_t worker : sortStreams_){
+                CUDA_CHECK(cudaStreamSynchronize(worker));
+            }
+        }
         if (valuesBuffer_) CUDA_CHECK(cudaFree(valuesBuffer_));
         CUDA_CHECK(cudaMalloc(&valuesBuffer_, capacity * sizeof(T)));
         valuesCapacity_ = capacity;
@@ -146,18 +190,31 @@ public:
             CUDA_CHECK(cudaMalloc(&blockOffsets_,
                                   static_cast<size_t>(persistentBlocks_) *
                                       MaxNbParts * sizeof(int)));
+            if(blockUniform_) CUDA_CHECK(cudaFree(blockUniform_));
+            CUDA_CHECK(cudaMalloc(&blockUniform_,
+                                  static_cast<size_t>(persistentBlocks_) *
+                                      MaxNbParts * sizeof(int)));
         }
     }
 
     T* valuesBuffer() { return valuesBuffer_; }
     T* pivots() { return pivots_; }
     int* counters() { return counters_; }
+    int* skipScatterFlag() { return counters_ + MaxNbParts + 1; }
     int* blockOffsets() { return blockOffsets_; }
+    int* blockUniform() { return blockUniform_; }
+    int* uniformParts() { return uniformParts_; }
+    int* activeNbParts() { return activeNbParts_; }
     size_t capacity() const { return valuesCapacity_; }
     int persistentBlocks() const { return persistentBlocks_; }
-    std::vector<T>& hostPivots() { return hostPivots_; }
     std::vector<int>& hostCounters() { return hostCounters_; }
+    std::vector<int>& hostUniformParts() { return hostUniformParts_; }
     std::vector<int>& hostLargePartitions() { return hostLargePartitions_; }
+    int nbSortStreams() const { return static_cast<int>(sortStreams_.size()); }
+    cudaStream_t sortStream(int idx) const { return sortStreams_[idx]; }
+    cudaEvent_t sortDone(int idx) const { return sortDone_[idx]; }
+    bool workerEventsRecorded() const { return workerEventsRecorded_; }
+    void markWorkerEventsRecorded() { workerEventsRecorded_ = true; }
 };
 
 
@@ -1315,66 +1372,200 @@ __global__ void MoveElements_Grid(T* __restrict__ data, const int size, const T*
 
 // First pass of the persistent partitioner.  Each persistent block writes its
 // complete histogram once; no global atomic operation is performed here.
+template <typename T>
+__host__ __device__ __forceinline__ bool EquivalentByOrderV3(
+        const T& lhs, const T& rhs) {
+    return !(lhs < rhs) && !(rhs < lhs);
+}
+
+
+// Performs the low-entropy pivot reduction entirely on the GPU.  Keeping the
+// active count in device memory removes the first host synchronization of V2.
+template <typename T, int MaxParts>
+__global__ void AdaptPartitionCountDevice(
+        T* pivots,
+        const int candidateParts,
+        int* activeNbParts) {
+    if(blockIdx.x != 0 || threadIdx.x != 0) return;
+
+    int distinctPivots = 0;
+    for(int idx = 0 ; idx < candidateParts - 1 ; ++idx){
+        if(idx == 0 || !EquivalentByOrderV3(pivots[idx-1], pivots[idx])){
+            ++distinctPivots;
+        }
+    }
+
+    int selectedParts = candidateParts;
+    if(candidateParts > 32 && distinctPivots <= 8){
+        for(int idx = 0 ; idx < 31 ; ++idx){
+            const int source = (idx * (candidateParts - 2)) / 30;
+            pivots[idx] = pivots[source];
+        }
+        pivots[31] = pivots[candidateParts-1];
+        selectedParts = 32;
+    }
+    *activeNbParts = selectedParts;
+}
+
+
 template <typename T, int MaxParts>
 __global__ void CountParts_Persistent(
         const T* __restrict__ data,
         const int size,
         const T* __restrict__ pivots,
         int* __restrict__ blockCounts,
-        const int nbParts) {
+        int* __restrict__ blockUniform,
+        const int* __restrict__ activeNbParts) {
+    __shared__ int nbParts;
     __shared__ int localCounters[MaxParts];
-    CountParts_Grid_core<T, MaxParts>(
-        data, size, pivots, nullptr, localCounters, nbParts);
+    __shared__ int localUniform[MaxParts];
+    __shared__ T localPivots[MaxParts];
+
+    if(threadIdx.x == 0) nbParts = *activeNbParts;
+    __syncthreads();
 
     for(int idxPart = threadIdx.x ; idxPart < nbParts ; idxPart += blockDim.x){
-        blockCounts[blockIdx.x * nbParts + idxPart] = localCounters[idxPart];
+        localCounters[idxPart] = 0;
+        localUniform[idxPart] = 1;
+        localPivots[idxPart] = pivots[idxPart];
+    }
+    __syncthreads();
+
+    const int id = threadIdx.x + blockIdx.x * blockDim.x;
+    const int numThreads = blockDim.x * gridDim.x;
+    int previousBucket = -1;
+    int runCount = 0;
+
+    for(int idxValue = id ; idxValue < size ; idxValue += numThreads){
+        const T value = data[idxValue];
+        const int bucket = binarySearch(localPivots, nbParts, value);
+
+        if(bucket != previousBucket){
+            if(previousBucket >= 0) atomicAdd(&localCounters[previousBucket], runCount);
+            previousBucket = bucket;
+            runCount = 0;
+        }
+        ++runCount;
+
+        // This is conservative and exact: a bucket is copied only when every
+        // value in it compares equivalent to its lower pivot.  Unlike V2 this
+        // also proves that the final CONSTANT/BINARY bucket is mono-valued.
+        if(!EquivalentByOrderV3(value, localPivots[bucket])){
+            atomicExch(&localUniform[bucket], 0);
+        }
+    }
+    if(previousBucket >= 0) atomicAdd(&localCounters[previousBucket], runCount);
+    __syncthreads();
+
+    for(int idxPart = threadIdx.x ; idxPart < nbParts ; idxPart += blockDim.x){
+        const int matrixIdx = blockIdx.x * MaxParts + idxPart;
+        blockCounts[matrixIdx] = localCounters[idxPart];
+        blockUniform[matrixIdx] = localUniform[idxPart];
     }
 }
 
 
 // Reduces the persistent-block histograms into one count per partition.
-template <int ReductionThreads = 256>
+template <int MaxParts, int ReductionThreads = 256>
 __global__ void ReduceBlockCounts(
         const int* __restrict__ blockCounts,
+        const int* __restrict__ blockUniform,
         int* __restrict__ partitionCounts,
+        int* __restrict__ uniformParts,
         const int nbPersistentBlocks,
-        const int nbParts) {
+        const int* __restrict__ activeNbParts) {
     const int idxPart = blockIdx.x;
+    const int nbParts = *activeNbParts;
     if(idxPart >= nbParts) return;
 
     int localSum = 0;
+    int localUniform = 1;
     for(int idxBlock = threadIdx.x ; idxBlock < nbPersistentBlocks ;
         idxBlock += blockDim.x){
-        localSum += blockCounts[idxBlock * nbParts + idxPart];
+        const int matrixIdx = idxBlock * MaxParts + idxPart;
+        localSum += blockCounts[matrixIdx];
+        localUniform &= blockUniform[matrixIdx];
     }
 
     __shared__ int reduction[ReductionThreads];
+    __shared__ int uniformReduction[ReductionThreads];
     reduction[threadIdx.x] = localSum;
+    uniformReduction[threadIdx.x] = localUniform;
     __syncthreads();
     for(int step = blockDim.x / 2 ; step > 0 ; step /= 2){
         if(threadIdx.x < step){
             reduction[threadIdx.x] += reduction[threadIdx.x + step];
+            uniformReduction[threadIdx.x] &= uniformReduction[threadIdx.x + step];
         }
         __syncthreads();
     }
-    if(threadIdx.x == 0) partitionCounts[idxPart] = reduction[0];
+    if(threadIdx.x == 0){
+        partitionCounts[idxPart] = reduction[0];
+        uniformParts[idxPart] = uniformReduction[0];
+    }
+}
+
+
+// If the complete input belongs to one verified mono-value bucket, the input
+// is already sorted.  The scatter kernel can then return immediately without
+// writing the full array to the workspace and back.
+__global__ void DetectSingleUniformBucket(
+        const int* __restrict__ partitionCounts,
+        const int* __restrict__ uniformParts,
+        const int* __restrict__ activeNbParts,
+        int* __restrict__ skipScatter) {
+    if(blockIdx.x != 0 || threadIdx.x != 0) return;
+    const int nbParts = *activeNbParts;
+    int nonEmpty = 0;
+    int allNonEmptyUniform = 1;
+    for(int idx = 0 ; idx < nbParts ; ++idx){
+        if(partitionCounts[idx] != 0){
+            ++nonEmpty;
+            allNonEmptyUniform &= uniformParts[idx];
+        }
+    }
+    *skipScatter = (nonEmpty == 1 && allNonEmptyUniform) ? 1 : 0;
+}
+
+
+template <class ElementType, typename IndexType>
+__device__ void BuildPrefix_SM_device(ElementType* prefix, IndexType N);
+
+
+template <typename IndexType, int MaxParts>
+__global__ void BuildPrefixDynamic(
+        IndexType* prefixTree,
+        const int* __restrict__ activeNbParts) {
+    __shared__ IndexType buffer[MaxParts];
+    const int nbParts = *activeNbParts;
+
+    for(int idx = threadIdx.x ; idx < nbParts ; idx += blockDim.x){
+        buffer[idx] = prefixTree[idx];
+    }
+    __syncthreads();
+    BuildPrefix_SM_device(buffer, nbParts);
+    for(int idx = threadIdx.x ; idx < nbParts ; idx += blockDim.x){
+        prefixTree[idx] = buffer[idx];
+    }
 }
 
 
 // Converts counts into the first output position owned by every
 // (persistent block, partition) pair. partitionBoundaries contains
 // [0, end(partition 0), ..., end(partition P-1)].
+template <int MaxParts>
 __global__ void BuildPersistentBlockOffsets(
         int* __restrict__ blockOffsets,
         const int* __restrict__ partitionBoundaries,
         const int nbPersistentBlocks,
-        const int nbParts) {
+        const int* __restrict__ activeNbParts) {
     const int idxPart = blockIdx.x;
+    const int nbParts = *activeNbParts;
     if(idxPart >= nbParts || threadIdx.x != 0) return;
 
     int offset = partitionBoundaries[idxPart];
     for(int idxBlock = 0 ; idxBlock < nbPersistentBlocks ; ++idxBlock){
-        const int index = idxBlock * nbParts + idxPart;
+        const int index = idxBlock * MaxParts + idxPart;
         const int count = blockOffsets[index];
         blockOffsets[index] = offset;
         offset += count;
@@ -1391,14 +1582,20 @@ __global__ void MoveElements_Persistent(
         const T* __restrict__ pivots,
         const int* __restrict__ blockOffsets,
         T* __restrict__ dataBuffer,
-        const int nbParts) {
+        const int* __restrict__ activeNbParts,
+        const int* __restrict__ skipScatter) {
     __shared__ T localPivots[MaxParts];
     __shared__ int localOffsets[MaxParts];
+    __shared__ int nbParts;
+
+    if(threadIdx.x == 0) nbParts = *activeNbParts;
+    __syncthreads();
+    if(*skipScatter) return;
 
     for(int idxPart = threadIdx.x ; idxPart < nbParts ;
         idxPart += blockDim.x){
         localPivots[idxPart] = pivots[idxPart];
-        localOffsets[idxPart] = blockOffsets[blockIdx.x * nbParts + idxPart];
+        localOffsets[idxPart] = blockOffsets[blockIdx.x * MaxParts + idxPart];
     }
     __syncthreads();
 
@@ -1414,8 +1611,37 @@ __global__ void MoveElements_Persistent(
         if(!stillInBucket){
             bucket = binarySearch(localPivots, nbParts, value);
         }
-        const int outputPosition = atomicAdd(&localOffsets[bucket], 1);
-        dataBuffer[outputPosition] = value;
+        if(nbParts <= 32){
+            // Low-entropy inputs made every lane contend on one or two shared
+            // counters in V2.  Aggregate equal buckets within a warp so that
+            // CONSTANT needs one atomic per warp instead of one per value.
+            const unsigned active = __activemask();
+            unsigned remaining = active;
+            const int lane = threadIdx.x & 31;
+            const unsigned laneBit = 1u << lane;
+            int outputPosition = 0;
+
+            while(remaining){
+                const int leader = __ffs(remaining) - 1;
+                const int leaderBucket = __shfl_sync(active, bucket, leader);
+                const unsigned group = __ballot_sync(active, bucket == leaderBucket);
+                if(group & laneBit){
+                    int base = 0;
+                    if(lane == leader){
+                        base = atomicAdd(&localOffsets[leaderBucket], __popc(group));
+                    }
+                    base = __shfl_sync(group, base, leader);
+                    const unsigned lanesBefore = group & (laneBit - 1u);
+                    outputPosition = base + __popc(lanesBefore);
+                }
+                remaining &= ~group;
+            }
+            dataBuffer[outputPosition] = value;
+        }
+        else{
+            const int outputPosition = atomicAdd(&localOffsets[bucket], 1);
+            dataBuffer[outputPosition] = value;
+        }
     }
 }
 
@@ -2030,12 +2256,6 @@ __host__ void SortMerge(
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
 
-template <typename T>
-__host__ __forceinline__ bool EquivalentByOrder(const T& lhs, const T& rhs) {
-    return !(lhs < rhs) && !(rhs < lhs);
-}
-
-
 // Sorts every small partition in one launch.  Partitions whose pivot interval
 // can contain only one representable value are copied directly, including
 // large constant buckets created by CONSTANT/BINARY inputs.
@@ -2044,7 +2264,7 @@ __global__ void SortPartitionsAdaptive_outofplace(
         const T* __restrict__ input,
         T* __restrict__ output,
         const int* __restrict__ counterParts,
-        const T* __restrict__ pivots,
+        const int* __restrict__ uniformParts,
         const int nbParts) {
     for(int idxPart = blockIdx.x ; idxPart < nbParts ; idxPart += gridDim.x){
         const int start = counterParts[idxPart];
@@ -2053,9 +2273,7 @@ __global__ void SortPartitionsAdaptive_outofplace(
 
         if(size == 0) continue;
 
-        const bool singleValueRange =
-            idxPart + 1 < nbParts &&
-            !(getNextVal(pivots[idxPart]) < pivots[idxPart+1]);
+        const bool singleValueRange = uniformParts[idxPart] != 0;
 
         if(singleValueRange){
             for(int idx = threadIdx.x ; idx < size ; idx += blockDim.x){
@@ -2084,41 +2302,6 @@ __global__ void SortPartitionsAdaptive_outofplace(
                 const_cast<T*>(input)+start, output+start, size, workingValues);
         }
     }
-}
-
-
-template <typename T, int MaxNbParts>
-__host__ int AdaptPartitionCount(
-        CuSortWorkspace<T, MaxNbParts>& workspace,
-        int candidateParts,
-        cudaStream_t stream) {
-    auto& hostPivots = workspace.hostPivots();
-    CUDA_CHECK(cudaMemcpyAsync(hostPivots.data(), workspace.pivots(),
-                               candidateParts * sizeof(T),
-                               cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-
-    int distinctPivots = 0;
-    for(int idx = 0 ; idx < candidateParts - 1 ; ++idx){
-        if(idx == 0 || !EquivalentByOrder(hostPivots[idx-1], hostPivots[idx])){
-            ++distinctPivots;
-        }
-    }
-
-    // Low-entropy samples do not benefit from hundreds of duplicate pivots.
-    // 32 was consistently best for CONSTANT/BINARY in the supplied tuning.
-    if(candidateParts > 32 && distinctPivots <= 8){
-        for(int idx = 0 ; idx < 31 ; ++idx){
-            const int source = (idx * (candidateParts - 2)) / 30;
-            hostPivots[idx] = hostPivots[source];
-        }
-        hostPivots[31] = hostPivots[candidateParts-1];
-        CUDA_CHECK(cudaMemcpyAsync(workspace.pivots(), hostPivots.data(),
-                                   32 * sizeof(T),
-                                   cudaMemcpyHostToDevice, stream));
-        return 32;
-    }
-    return candidateParts;
 }
 
 
@@ -2243,68 +2426,68 @@ __host__ void HybridSortLegacy(T* dataToSort, const int nbValuesToSort, cudaStre
 }
 
 
-// Recommended API.  Reserve the workspace once outside the measured region:
-//
-//   CuSortWorkspace<MyType, 1024> ws(maxSize);
-//   HybridSortV2<MyType>(deviceValues, size, ws, stream);
-//
-// No allocation, stream creation, or stream destruction occurs after reserve.
+// The supplied measurements show no partitioning crossover for 32-bit values
+// up to 2^28 elements.  Eight-byte structures cross over only around 2^27.
+// This trait is deliberately specializable for another GPU or value type.
+template <typename T>
+struct CuSortTuning {
+    static constexpr int PartitionThreshold =
+        sizeof(T) <= 4 ? std::numeric_limits<int>::max() : (1 << 27);
+};
+
+
+// Explicit partitioned path.  It remains public so that the research variant
+// can be benchmarked independently of the data-driven automatic dispatcher.
 template <typename T,
           int MaxValuesToSort = 2048,
           int MaxNbParts = 1024,
           bool TestIfSorted = false,
           bool FullSM = true>
-__host__ void HybridSortV2(
+__host__ void HybridSortPartitionedV3(
         T* dataToSort,
         const int nbValuesToSort,
         CuSortWorkspace<T, MaxNbParts>& workspace,
         cudaStream_t stream = 0) {
     static_assert(((MaxValuesToSort - 1) & MaxValuesToSort) == 0,
                   "MaxValuesToSort must be a power of 2");
-
     if(nbValuesToSort <= 1) return;
+
     workspace.reserve(static_cast<size_t>(nbValuesToSort));
+
+    // A workspace may be reused from a different caller stream.  These waits
+    // prevent the next partition pass from overwriting ranges still consumed
+    // by a worker from the previous invocation.
+    if(workspace.workerEventsRecorded()){
+        for(int idx = 0 ; idx < workspace.nbSortStreams() ; ++idx){
+            CUDA_CHECK(cudaStreamWaitEvent(stream, workspace.sortDone(idx), 0));
+        }
+    }
 
     constexpr int MergeThreadsPerBlock =
         std::min(DefaultNbThreadsPerBlock, MaxValuesToSort/16);
 
-    // This path now reuses the workspace buffer.  It removes the ~1.2 ms
-    // allocation floor observed immediately above the one-block bitonic limit.
-    if(nbValuesToSort <= MaxValuesToSort * 16){
-        SortMerge<T, MaxValuesToSort, TestIfSorted, FullSM>(
-            dataToSort, nbValuesToSort, MergeThreadsPerBlock, stream,
-            workspace.valuesBuffer(), workspace.capacity(), true);
-        return;
-    }
-
     const int candidateParts = std::min(
         MaxNbParts,
-        std::max(32, (nbValuesToSort + MaxValuesToSort - 1) /
-                         MaxValuesToSort));
-    const int candidatePartsPow2 =
-        GreaterPowerOf2EqualOrLarger(candidateParts);
+        std::max(32, 1 + (nbValuesToSort - 1) / MaxValuesToSort));
+    const int candidatePartsPow2 = GreaterPowerOf2EqualOrLarger(candidateParts);
     const int pivotThreads = std::max(32, candidatePartsPow2);
 
-    CUDA_CHECK(cudaMemsetAsync(workspace.pivots(), 0,
-                               candidateParts * sizeof(T), stream));
     if(pivotThreads * 2 <= DefaultNbThreadsPerBlock){
         Sort_core_buildPivots<T, MaxNbParts, 2, false, FullSM>
             <<<1, pivotThreads * 2, 0, stream>>>(
-                dataToSort, nbValuesToSort,
-                workspace.pivots(), candidateParts);
+                dataToSort, nbValuesToSort, workspace.pivots(), candidateParts);
     }
     else{
         Sort_core_buildPivots<T, MaxNbParts, 1, false, FullSM>
             <<<1, DefaultNbThreadsPerBlock, 0, stream>>>(
-                dataToSort, nbValuesToSort,
-                workspace.pivots(), candidateParts);
+                dataToSort, nbValuesToSort, workspace.pivots(), candidateParts);
     }
 
-    const int nbParts = AdaptPartitionCount<T, MaxNbParts>(
-        workspace, candidateParts, stream);
+    AdaptPartitionCountDevice<T, MaxNbParts><<<1, 1, 0, stream>>>(
+        workspace.pivots(), candidateParts, workspace.activeNbParts());
 
     CUDA_CHECK(cudaMemsetAsync(workspace.counters(), 0,
-                               (nbParts + 2) * sizeof(int), stream));
+                               (candidateParts + 2) * sizeof(int), stream));
 
     const int allBlocks =
         (nbValuesToSort + DefaultNbThreadsPerBlock - 1) /
@@ -2315,33 +2498,54 @@ __host__ void HybridSortV2(
     CountParts_Persistent<T, MaxNbParts>
         <<<persistentBlocks, DefaultNbThreadsPerBlock, 0, stream>>>(
             dataToSort, nbValuesToSort, workspace.pivots(),
-            workspace.blockOffsets(), nbParts);
+            workspace.blockOffsets(), workspace.blockUniform(),
+            workspace.activeNbParts());
 
-    ReduceBlockCounts<256>
-        <<<nbParts, 256, 0, stream>>>(
-            workspace.blockOffsets(), workspace.counters()+1,
-            persistentBlocks, nbParts);
+    ReduceBlockCounts<MaxNbParts, 256>
+        <<<candidateParts, 256, 0, stream>>>(
+            workspace.blockOffsets(), workspace.blockUniform(),
+            workspace.counters()+1, workspace.uniformParts(),
+            persistentBlocks, workspace.activeNbParts());
 
-    BuildPrefix_SM<int, MaxNbParts>
-        <<<1, nbParts, 0, stream>>>(workspace.counters()+1, nbParts);
+    DetectSingleUniformBucket<<<1, 1, 0, stream>>>(
+        workspace.counters()+1, workspace.uniformParts(),
+        workspace.activeNbParts(), workspace.skipScatterFlag());
 
-    BuildPersistentBlockOffsets
-        <<<nbParts, 1, 0, stream>>>(
+    BuildPrefixDynamic<int, MaxNbParts>
+        <<<1, std::min(candidateParts, DefaultNbThreadsPerBlock), 0, stream>>>(
+            workspace.counters()+1, workspace.activeNbParts());
+
+    BuildPersistentBlockOffsets<MaxNbParts>
+        <<<candidateParts, 1, 0, stream>>>(
             workspace.blockOffsets(), workspace.counters(),
-            persistentBlocks, nbParts);
+            persistentBlocks, workspace.activeNbParts());
 
     MoveElements_Persistent<T, MaxNbParts>
         <<<persistentBlocks, DefaultNbThreadsPerBlock, 0, stream>>>(
             dataToSort, nbValuesToSort, workspace.pivots(),
-            workspace.blockOffsets(), workspace.valuesBuffer(), nbParts);
+            workspace.blockOffsets(), workspace.valuesBuffer(),
+            workspace.activeNbParts(), workspace.skipScatterFlag());
 
     auto& hostCounters = workspace.hostCounters();
-    CUDA_CHECK(cudaMemcpyAsync(hostCounters.data(), workspace.counters(),
-                               (nbParts + 1) * sizeof(int),
+    auto& hostUniform = workspace.hostUniformParts();
+    int nbParts = 0;
+    int skippedScatter = 0;
+    CUDA_CHECK(cudaMemcpyAsync(&nbParts, workspace.activeNbParts(), sizeof(int),
                                cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(hostCounters.data(), workspace.counters(),
+                               (candidateParts + 1) * sizeof(int),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(hostUniform.data(), workspace.uniformParts(),
+                               candidateParts * sizeof(int),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(&skippedScatter, workspace.skipScatterFlag(),
+                               sizeof(int), cudaMemcpyDeviceToHost, stream));
+
+    // This is now the only host synchronization in the partitioned path.
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    const auto& hostPivots = workspace.hostPivots();
+    if(skippedScatter) return;
+
     auto& largePartitions = workspace.hostLargePartitions();
     int maxSmallPartition = 0;
     bool hasDirectPartition = false;
@@ -2351,11 +2555,7 @@ __host__ void HybridSortV2(
         const int size = hostCounters[idxPart+1] - hostCounters[idxPart];
         if(size == 0) continue;
 
-        const bool singleValueRange =
-            idxPart + 1 < nbParts &&
-            !(getNextVal(hostPivots[idxPart]) < hostPivots[idxPart+1]);
-
-        if(singleValueRange){
+        if(hostUniform[idxPart]){
             hasDirectPartition = true;
         }
         else if(size <= ComputeDefaultMaxBitoSort<T>()){
@@ -2377,43 +2577,107 @@ __host__ void HybridSortV2(
         SortPartitionsAdaptive_outofplace<T, TestIfSorted, FullSM>
             <<<nbParts, DefaultNbThreadsPerBlock, sharedBytes, stream>>>(
                 workspace.valuesBuffer(), dataToSort,
-                workspace.counters(), workspace.pivots(), nbParts);
+                workspace.counters(), workspace.uniformParts(), nbParts);
     }
 
-    // Oversized buckets are normally few.  Processing them on the caller's
-    // stream avoids creating eight streams and events per invocation.  Each
-    // merge reuses the two corresponding ranges as its ping-pong buffers.
+    // The streams and events are created once with the workspace.  This keeps
+    // the useful overlap of the legacy path without recreating CUDA objects on
+    // every call.
+    const int usedStreams =
+        std::min(nbLargePartitions, workspace.nbSortStreams());
     for(int idxLarge = 0 ; idxLarge < nbLargePartitions ; ++idxLarge){
         const int idxPart = largePartitions[idxLarge];
         const int start = hostCounters[idxPart];
         const int size = hostCounters[idxPart+1] - start;
+        const int idxWorker = idxLarge % usedStreams;
         SortMerge<T, MaxValuesToSort, TestIfSorted, FullSM>(
-            workspace.valuesBuffer()+start, size,
-            MergeThreadsPerBlock, stream,
-            dataToSort+start, size, false);
+            workspace.valuesBuffer()+start, size, MergeThreadsPerBlock,
+            workspace.sortStream(idxWorker), dataToSort+start, size, false);
+    }
+
+    if(usedStreams > 0){
+        for(int idxWorker = 0 ; idxWorker < workspace.nbSortStreams(); ++idxWorker){
+            CUDA_CHECK(cudaEventRecord(workspace.sortDone(idxWorker),
+                                       workspace.sortStream(idxWorker)));
+            CUDA_CHECK(cudaStreamWaitEvent(stream, workspace.sortDone(idxWorker), 0));
+        }
+        workspace.markWorkerEventsRecorded();
     }
 }
 
 
-// Convenience overload.  Correct, but it allocates and synchronizes during
-// the call.  Performance-sensitive code should keep a workspace alive.
 template <typename T,
           int MaxValuesToSort = 2048,
           int MaxNbParts = 1024,
           bool TestIfSorted = false,
           bool FullSM = true>
-__host__ void HybridSortV2(
+__host__ void HybridSortV3(
+        T* dataToSort,
+        const int nbValuesToSort,
+        CuSortWorkspace<T, MaxNbParts>& workspace,
+        cudaStream_t stream = 0) {
+    if(nbValuesToSort <= 1) return;
+
+    constexpr int MergeThreadsPerBlock =
+        std::min(DefaultNbThreadsPerBlock, MaxValuesToSort/16);
+    const bool usePartitioning =
+        nbValuesToSort >= CuSortTuning<T>::PartitionThreshold;
+
+    if(!usePartitioning){
+        // One-block bitonic cases require no workspace at all.
+        if(nbValuesToSort <= ComputeDefaultMaxBitoSort<T>()){
+            SortMerge<T, MaxValuesToSort, TestIfSorted, FullSM>(
+                dataToSort, nbValuesToSort, MergeThreadsPerBlock, stream,
+                nullptr, 0, true);
+            return;
+        }
+        if(workspace.workerEventsRecorded()){
+            for(int idx = 0 ; idx < workspace.nbSortStreams() ; ++idx){
+                CUDA_CHECK(cudaStreamWaitEvent(stream, workspace.sortDone(idx), 0));
+            }
+        }
+        workspace.reserve(static_cast<size_t>(nbValuesToSort));
+        SortMerge<T, MaxValuesToSort, TestIfSorted, FullSM>(
+            dataToSort, nbValuesToSort, MergeThreadsPerBlock, stream,
+            workspace.valuesBuffer(), workspace.capacity(), true);
+        return;
+    }
+
+    HybridSortPartitionedV3<T, MaxValuesToSort, MaxNbParts,
+                            TestIfSorted, FullSM>(
+        dataToSort, nbValuesToSort, workspace, stream);
+}
+
+
+// Convenience overload: the fast merge/bitonic dispatch happens before any
+// workspace construction.  Only the genuinely partitioned path allocates a
+// temporary workspace and therefore has to synchronize before destruction.
+template <typename T,
+          int MaxValuesToSort = 2048,
+          int MaxNbParts = 1024,
+          bool TestIfSorted = false,
+          bool FullSM = true>
+__host__ void HybridSortV3(
         T* dataToSort,
         const int nbValuesToSort,
         cudaStream_t stream = 0) {
+    constexpr int MergeThreadsPerBlock =
+        std::min(DefaultNbThreadsPerBlock, MaxValuesToSort/16);
+    if(nbValuesToSort < CuSortTuning<T>::PartitionThreshold){
+        SortMerge<T, MaxValuesToSort, TestIfSorted, FullSM>(
+            dataToSort, nbValuesToSort, MergeThreadsPerBlock, stream,
+            nullptr, 0, true);
+        return;
+    }
+
     CuSortWorkspace<T, MaxNbParts> workspace(nbValuesToSort);
-    HybridSortV2<T, MaxValuesToSort, MaxNbParts, TestIfSorted, FullSM>(
+    HybridSortPartitionedV3<T, MaxValuesToSort, MaxNbParts,
+                            TestIfSorted, FullSM>(
         dataToSort, nbValuesToSort, workspace, stream);
     CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
 
-// Public name for the revised implementation.
 template <typename T,
           int MaxValuesToSort = 2048,
           int MaxNbParts = 1024,
@@ -2424,7 +2688,7 @@ __host__ void HybridSort(
         const int nbValuesToSort,
         CuSortWorkspace<T, MaxNbParts>& workspace,
         cudaStream_t stream = 0) {
-    HybridSortV2<T, MaxValuesToSort, MaxNbParts, TestIfSorted, FullSM>(
+    HybridSortV3<T, MaxValuesToSort, MaxNbParts, TestIfSorted, FullSM>(
         dataToSort, nbValuesToSort, workspace, stream);
 }
 
@@ -2438,7 +2702,7 @@ __host__ void HybridSort(
         T* dataToSort,
         const int nbValuesToSort,
         cudaStream_t stream = 0) {
-    HybridSortV2<T, MaxValuesToSort, MaxNbParts, TestIfSorted, FullSM>(
+    HybridSortV3<T, MaxValuesToSort, MaxNbParts, TestIfSorted, FullSM>(
         dataToSort, nbValuesToSort, stream);
 }
 
