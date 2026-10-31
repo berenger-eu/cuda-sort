@@ -1,0 +1,344 @@
+\documentclass{article}
+\usepackage{graphicx} % Required for inserting images
+\usepackage{url}
+
+\title{Bitonic-based sort on GPU: tuning and optimizations}
+\author{berenger.bramas }
+\date{December 2025}
+
+\begin{document}
+
+\maketitle
+
+\section{Abstract}
+
+
+\section{Introduction}
+
+Sorting is a fundamental operation in computer science with applications spanning numerous domains such as data analysis, computer graphics, and scientific computing. Improving the performance of sorting algorithms on modern hardware architectures has significant implications for the efficiency of a wide range of applications, particularly when dealing with large-scale datasets. In recent years, Graphics Processing Units (GPUs) have emerged as powerful platforms for parallel computing, offering massive computational throughput and becoming the standard architecture for high-performance computing systems, including the largest supercomputers in the world~\footnote{\url{https://www.top500.org}}.
+
+Despite their computational potential, designing efficient sorting algorithms for GPUs remains challenging due to issues such as load balancing, parallel memory access patterns, synchronization overhead, and element-wise dependencies. Consequently, providing high-performance GPU sorting algorithms has been an active area of research. Most existing implementations are based on well-known parallel sorting techniques, including radix sort, merge sort, and bitonic sort, each presenting distinct trade-offs in terms of performance, implementation complexity, and adaptability.
+
+Among these, bitonic sort is particularly attractive for GPU architectures because of its regular structure and predictable memory access patterns, which facilitate efficient parallelization and optimization. Building on these properties, this paper presents Bicuso Sort, a novel GPU-based sorting algorithm inspired by bitonic principles. The objectives of Bicuso Sort are to define a sorting method that is efficient on modern GPU architectures, easy to implement, and adaptable to various data types and problem sizes.
+
+We explore the implementation and optimization of this bitonic-based approach on GPUs, focusing on tuning techniques and original optimization strategies. A comprehensive performance analysis is provided, including the impact of memory coalescing, shared memory utilization, and kernel launch configurations. By leveraging the massive parallelism of GPUs, we aim to achieve substantial speedups over traditional CPU-based sorting algorithms while maintaining simplicity and scalability.
+
+The contributions of this paper are as follows:
+\begin{itemize}
+    \item We introduce Bicuso Sort, a new GPU-based sorting algorithm that combines block-level sorting with multi-partitioning and merging techniques to achieve high performance;
+    \item We present an optimized implementation of the bitonic sort algorithm for small arrays that fit in shared memory;
+    \item We describe a sorting implementation that use multi-partitioning and bitonic sort to efficiently sort large arrays on GPUs;
+    \item We conduct a thorough performance evaluation, comparing our bitonic sort implementation against traditional sorting algorithms on GPUs, demonstrating its efficiency and scalability.
+\end{itemize}
+
+The paper is organized as follows: Section~\ref{sec:related_work} reviews related work in GPU sorting algorithms. Section~\ref{sec:background} provides background information on GPU architectures and parallel sorting techniques. Section~\ref{sec:bicuso_sort} details the design and implementation of the Bicuso Sort algorithm. Section~\ref{sec:experiments} presents experimental results and performance comparisons. Finally, Section~\ref{sec:conclusion} concludes the paper and discusses future work.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Background}
+\label{sec:background}
+
+\subsection{GPU Architecture Overview}
+
+GPUs were originally designed for rendering graphics, but their highly parallel structure makes them well-suited for general-purpose computing tasks.
+The major milestone that made it possible has been the creation of programming models such as CUDA~\footnote{\url{https://developer.nvidia.com/cuda-zone}} and OpenCL~\footnote{\url{https://www.khronos.org/opencl/}}, which allow developers to write code that can be executed on GPUs.
+CUDA, developed by NVIDIA, provides a C/C++-like programming environment for writing parallel code that can run on NVIDIA GPUs.
+It has become the de facto standard for GPU programming due to its ease of use and extensive support for various GPU features.
+
+The architecture of modern GPUs consists of multiple Streaming Multiprocessors (SMs), each containing a computation core, shared memory, and various caches.
+Each SM can execute multiple threads concurrently, and schedule memory accesses and computation to increase throughput.
+The number of threads that can be executed simultaneously is limited by the available resources and by kernel-tied limitations, such as shared memory and register usage
+
+CUDA is a programming model that at the same time map and abstract the GPU hardware.
+In CUDA, the computation is parallelized across a large number of lightweight threads organized into blocks and grids.
+Each thread executes the same kernel function but is expected to operate on different data elements.
+Threads within a block can communicate and synchronize using shared memory, which is a fast, low-latency memory space.
+Global memory, on the other hand, is accessible by all threads but has higher latency.
+Warps are groups of 32 threads that execute instructions in lockstep, meaning they execute the same instruction simultaneously, which is part of the SIMD (Single Instruction, Multiple Data) model, but called SIMT (Single Instruction, Multiple Threads) in CUDA terminology.
+Threads of the same warp should ideally follow the same execution path to avoid divergence.
+On the other hand, they can use special instructions to perform collective operations, such as warp-level shuffles, which allow threads within a warp to exchange data without using shared memory.
+
+Synchronization between threads within a block is usually needed to ensure correctness, and is expected to be cheap but not free.
+However, synchronization between different blocks is much more costly, as it requires kernel launches and global memory accesses, and should be avoided when possible.
+
+\subsection{Sorting Algorithms}
+
+Sorting an array of elements consists in rearranging the elements in a specific order, typically ascending or descending.
+The complexities of sorting algorithms are usually expressed in terms of time and space.
+Time complexity refers to the relationship between the size of the input and the number of operations required to sort it, while space complexity refers to the amount of additional memory required by the algorithm.
+Worst-case and average-case complexities are usually considered to compare sorting algorithms, but in the end, the actual performance on specific hardware and data distributions is what matters.
+
+Common sorting algorithms include quicksort, mergesort, heapsort, and radix sort.
+Quicksort is a divide-and-conquer algorithm that selects a pivot element and partitions the array into two sub-arrays, one with elements less than the pivot and another with elements greater than the pivot.
+Mergesort is another divide-and-conquer algorithm that recursively divides the array into halves, sorts each half, and then merges the sorted halves.
+Heapsort builds a binary heap from the input array and repeatedly extracts the maximum element to build the sorted array.
+Radix sort is a non-comparative sorting algorithm that processes the digits of the numbers, sorting them based on each digit from the least significant to the most significant.
+
+The divide-and-conquer paradigm is particularly well-suited for parallelization on CPU, as it allows different parts of the array to be sorted independently.
+However, on GPUs, the synchronizations is extrmly costly between thread blocks, making it challenging to implement the first steps of these algorithms efficiently.
+
+Mergesort appears as a better candidate for GPU implementation, as the merging step can be parallelized effectively.
+However, the recursive nature of mergesort can lead to significant overhead due to multiple kernel launches and memory transfers between global and shared memory.
+
+On the other hand, sorting networks, such as bitonic sort and odd-even mergesort, are designed for parallel architectures and can be implemented efficiently on GPUs because they consist of a fixed sequence of compare-and-swap operations that can be executed in parallel.
+Bitonic sort is based on the concept of bitonic sequences, which are sequences that first increase and then decrease, or can be circularly shifted to form such a sequence.
+The bitonic sort algorithm consists of two main phases: the bitonic merge and the bitonic sort.
+The bitonic merge takes a bitonic sequence and rearranges it into a sorted sequence by performing a series of compare-and-swap operations.
+The bitonic sort builds bitonic sequences from unsorted data and then applies the bitonic merge to sort the entire array.
+Bitonic sort is particularly attractive for GPU architectures because of its regular structure and predictable memory access patterns, which facilitate efficient parallelization and optimization.
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Related Work}
+\label{sec:related_work}
+
+Sorting on massively parallel GPUs has been extensively studied, with research spanning comparison-based sorting networks, merge-based approaches, distribution-based methods such as radix and sample sort, and hybrid combinations that attempt to balance parallelism, memory efficiency, and load balance. Surveys of parallel sorting literature classify GPU methods primarily into merge-sort variants, radix-sort variants, and other hybrid or network-based techniques, while further distinguishing works by optimization strategy such as load balancing, cache efficiency, reduction of bank conflicts, and computational complexity reduction \cite{yu2022survey}.
+
+\subsection{GPU Merge-Based Sorting}
+
+Merge-based sorting has long been attractive for parallel architectures due to its regular structure and deterministic behavior. Early parallel merge formulations focused on balanced decomposition of the merge operation, culminating in the Merge Path framework, which provides a simple yet effective way to partition two sorted sequences into independent merge tasks with equal work \cite{odeh2012mergepath}. This technique was later adapted specifically for GPUs, enabling high-throughput parallel merging and forming a building block for GPU merge sort pipelines \cite{bader2013gpumergepath}.
+
+Several GPU implementations build full sorting systems around merge primitives. Satish et al.\ present high-performance GPU merge and merge-sort routines that emphasize memory coalescing, thread-level parallelism, and hierarchical merging \cite{satish2009designing}. Panwar et al.\ propose GPU Matrix Sort, an approach that reshapes input data into matrices, sorts rows in parallel, and recursively merges rows, effectively mapping merge sort onto GPU-friendly structures \cite{panwar2014matrixsort}. OpenCL implementations of odd-even merge sort further demonstrate the practicality of merge networks on GPU architectures \cite{zhang2011oddeven}.
+
+While merge-based approaches provide predictable performance and strong worst-case bounds, they often suffer from heavy global memory traffic and require careful partitioning to maintain load balance at scale.
+
+\subsection{Sorting Networks and Bitonic-Based Methods}
+
+Sorting networks, including bitonic and odd-even networks, are attractive on GPUs because they avoid control-flow divergence and use fixed communication patterns. Hybrid odd-even merge sort variants and optimized pairwise merge networks have been implemented on GPUs, showing good performance for moderate problem sizes and regular data layouts \cite{zhang2011oddeven, berney2020engineering}.
+
+However, classical bitonic and odd-even networks exhibit \(O(n \log^2 n)\) work complexity, making them less competitive for large inputs compared to merge- or distribution-based algorithms. As a result, recent work often embeds sorting networks inside larger frameworks, using them for small-tile sorting or as building blocks inside hybrid algorithms.
+
+\subsection{Distribution-Based and Hybrid GPU Sorting}
+
+Radix sort is one of the most widely used GPU sorting techniques due to its linear-time complexity and high throughput \cite{satish2009designing}. Sample sort and hybrid sample/merge strategies further attempt to combine distribution-based partitioning with merge-based refinement \cite{leischner2010gpusamplesort, sintorn2008hybrid}.
+
+Hybrid GPU sorting algorithms combine multiple paradigms to exploit their complementary strengths. Sintorn and Assarsson integrate bucket-based partitioning with local sorting and merging \cite{sintorn2008hybrid}, while Satish et al.\ mix radix sorting with merge-based postprocessing \cite{satish2009designing}. Resource-oblivious hybrid strategies interleave merge and sample sort to mitigate worst-case overheads and improve scalability \cite{nyu2017resourceoblivious}.
+
+Despite these advances, existing hybrid methods typically combine distribution-based partitioning with radix or sample sort, rather than integrating sorting networks with merge-driven global ordering.
+
+\subsection{Positioning of This Work}
+
+In contrast to prior approaches, our method explicitly couples bitonic sorting with partitioning and merge-based composition. Bitonic networks are employed for efficient local ordering and predictable intra-block behavior, while global ordering is achieved through partitioning and parallel merging.
+
+This design occupies a middle ground between network-based and merge-based GPU sorting. Unlike pure sorting-network approaches, it scales beyond small tiles through hierarchical merging. Unlike traditional merge-sort pipelines, it leverages the deterministic structure of bitonic sorting to simplify local ordering and reduce control divergence.
+
+To the best of our knowledge, this specific combination of bitonic sorting with partition-driven merging has not been systematically explored in existing GPU sorting frameworks, which primarily emphasize radix-merge or sample-merge hybrids. Our work therefore contributes a new hybrid design point in the GPU sorting design space.
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Sorting small arrays using bitonic sort}
+\label{sec:bicuso_sort}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Sorting within a block}
+
+In this section, we describe how to sort arrays that can fit in shared memory using bitonic sort.
+We propose different implementations depending on the size of the array, and we use these kernels as building blocks for sorting larger arrays.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsubsection{Sorting small arrays (<=32 elements)}
+
+When the number of elements to sort is less than or equal to the number of threads in a warp (32), we can use the shuffle instructions to perform the compare-exchange operations without using shared memory and we can synchronize only the threads of the warp where needed.
+We provide the pseudo code in Algorithm~\ref{alg:warp_bitonic}.
+In this case, each thread can be seen as a vector element, which corresponds at a line in the bitonic network.
+In terms of synchronization, the main principle is that each thread loads the value from its position and a value and put it into its register, then we need such that after a synchronization point, threads can overwrite the array with the values stored in their registers.
+
+This device routine implements a warp-level sorting network for up to 32 elements, with a one-to-one mapping between elements and warp lanes. 
+
+Execution is restricted to the first warp of the block (\texttt{threadIdx.x < 32}), assuming \texttt{nbValuesToSort $\leq$ 32}. The algorithm follows a bitonic-style compare--exchange network: an outer loop (\texttt{stepout}, doubling from 1 to 16) constructs the bitonic merge pattern, while an inner loop (\texttt{step}, halving down to 1) completes the local ordering. At each stage, the partner index is derived from the lane bit pattern and an accumulated offset, and each lane retains either the minimum or maximum of the two values depending on the sorting direction implied by the current bit. Two implementations are provided. The shared-memory variant explicitly stores intermediate results in \texttt{dataToSort[]} and enforces intra-warp ordering with \texttt{\_\_syncwarp} between read, compare, and write phases. The register-based variant avoids shared memory by holding the element in a register and performing lane-to-lane exchanges using \texttt{\_\_shfl\_sync}, committing the result to memory only once at the end. 
+
+\begin{algorithm}[t]
+\DontPrintSemicolon
+\SetKwInOut{Input}{Input}
+\SetKwInOut{Output}{Output}
+
+\Input{$dataToSort[0..31]$ : array of 32 elements distributed one per lane}
+\Output{$dataToSort$ sorted within the warp (bitonic-style network)}
+
+\BlankLine
+\KwData{$fullMask \gets \texttt{0xFFFFFFFF}$}
+$a \gets dataToSort[lane]$ \tcp*{$lane \in \{0,\dots,31\}$ is the warp lane id}
+$vecincout \gets 0$ \tcp*{assumed initialized before the loop (your code updates it)}
+
+\For{$stepout \gets 1$ \KwTo $31$ \KwStep $stepout \gets 2\cdot stepout$}{
+    $ffttout \gets (lane \ \&\ stepout)$\;
+    \lIf{$ffttout \neq 0$}{$vecincout \gets vecincout - stepout$}
+    \lElse{$vecincout \gets vecincout + stepout$}
+    $vecpermute \gets vecincout + lane$\;
+    $b \gets \textsc{ShflSync}(fullMask, a, vecpermute)$\;
+    \lIf{$ffttout \neq 0$}{$a \gets \max(a,b)$}
+    \lElse{$a \gets \min(a,b)$}
+
+    \For(\tcp*[f]{merge steps}){$step \gets \lfloor stepout/2 \rfloor$ \KwDownTo $1$ \KwStep $step \gets \lfloor step/2 \rfloor$}{
+        $fftt \gets (lane \ \&\ step)$\;
+        \lIf{$fftt \neq 0$}{$vecincout2 \gets -step$}
+        \lElse{$vecincout2 \gets \ \ step$}
+        $vecpermute \gets vecincout2 + lane$\;
+        $b \gets \textsc{ShflSync}(fullMask, a, vecpermute)$\;
+        \lIf{$fftt \neq 0$}{$a \gets \max(a,b)$}
+        \lElse{$a \gets \min(a,b)$}
+    }
+}
+$dataToSort[lane] \gets a$\;
+
+\caption{Warp-level sorting of 32 values using shuffle-based compare-exchange (bitonic-like).}
+\label{alg:warp_bitonic}
+\end{algorithm}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsubsection{Sorting medium arrays (>32 and <=1024 elements)}
+
+The constraint in terms of size is that the array to sort must fit in shared memory, and that we should have enougth threads to load all the values in parallel.
+
+The kernel is implemented as follows:
+\begin{itemize}
+    \item Each thread loads one element from global memory to shared memory, or pads the array with +infinity if the array size is not a multiple of two;
+    \item Each warp sorts its portion of the array using the warp-level bitonic sort described in the previous section;
+    \item All the threads synchronize using \texttt{\_\_syncthreads()};
+    \item We perform the bitonic merge steps across warps, using shared memory to exchange values between warps, and finish with a step at warp-level;
+    \item Each thread writes back its sorted element from shared memory to global memory.
+\end{itemize}
+
+In this approach we need to use synchronization just before the threads write into the shared memory, to ensure all threads have read their values, and just after the write into shared memory, to ensure all threads have written their values before reading for the next step.
+We can remove a synchronization point, if we use a buffer in shared memory, such that each step writes into a different location than the one it reads from.
+The original array and the buffer are swapped at each step.
+
+\begin{algorithm}[H]
+\DontPrintSemicolon
+\SetKwInOut{Input}{Input}
+\SetKwInOut{Output}{Output}
+
+\Input{$dataToSort[0 \dots nbValuesToSort-1]$ in shared memory, $\texttt{threadIdx.x}$, initial $\texttt{vecincout}$}
+\Output{$dataToSort$ updated in-place (compare-exchange network stage)}
+
+\tcp{Omitted: sorting within warps using warp-level bitonic sort}
+
+\For{$stepout \gets 32$ \KwTo $nbValuesToSort - 1$ \KwStep $stepout \gets 2 \cdot stepout$}{
+    $ffttout \gets (\texttt{threadIdx.x} \;\&\; stepout)$\;
+    $\texttt{vecincout} \gets \texttt{vecincout} + (ffttout \neq 0 \;?\; -stepout \;:\; stepout)$\;
+    $vecpermute \gets \texttt{threadIdx.x} + \texttt{vecincout}$\;
+    $a \gets dataToSort[\texttt{threadIdx.x}]$\;
+    $b \gets dataToSort[vecpermute]$\;
+    $best \gets (ffttout \neq 0 \;?\; \max(a,b) \;:\; \min(a,b))$\;
+
+    \tcp{CUDA barrier: \_\_syncthreads()}
+    \textbf{sync}\;
+
+    $dataToSort[\texttt{threadIdx.x}] \gets best$\;
+
+    \tcp{CUDA barrier: \_\_syncthreads()}
+    \textbf{sync}\;
+
+    \For{$step \gets stepout/2$ \KwDownTo $32$ \KwStep $step \gets step/2$}{
+        $vecinc \gets step$\;
+        $fftt \gets (\texttt{threadIdx.x} \;\&\; step)$\;
+        $vecincout2 \gets (fftt \neq 0 \;?\; -vecinc \;:\; vecinc)$\;
+        $vecpermute \gets \texttt{threadIdx.x} + vecincout2$\;
+        $a \gets dataToSort[\texttt{threadIdx.x}]$\;
+        $b \gets dataToSort[vecpermute]$\;
+        $best \gets (fftt \neq 0 \;?\; \max(a,b) \;:\; \min(a,b))$\;
+
+        \tcp{CUDA barrier: \_\_syncthreads()}
+        \textbf{sync}\;
+
+        $dataToSort[\texttt{threadIdx.x}] \gets best$\;
+
+        \tcp{CUDA barrier: \_\_syncthreads()}
+        \textbf{sync}\;
+    }
+
+    \tcp{Omitted: sorting within warps using warp-level bitonic sort}
+}
+\caption{CUDA-style compare--exchange stages (shared-memory bitonic-like network)}
+\end{algorithm}
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsubsection{Sorting large arrays (>1024 elements)}
+
+When the array and the buffer are the largest that can fit in shared memory, there are more elements than the number of threads a block can have.
+Consequently, each thread must handle multiple elements, and thus it is impossible to compute the index of the element to read or write iteratively as in the previous algorithms.
+Instead, each thread computes the indices of all the elements it must handle at each step.
+To do so, we use bitwise address arithmetic to compute the indices of the elements to compare and exchange.
+It is clear that with this approach we need a buffer because the threads cannot store all their values in registers.
+While this kernel can sort larger arrays, this will also occupy all the shared memory of the block, preventing other blocks from being launched on the same SM.
+Therefore, it is recommended to carefuly dynamically allocate shared memory based on the needed size, and not the maximum possible size.
+
+\begin{algorithm}[H]
+\DontPrintSemicolon
+\SetKwProg{Fn}{Function}{:}{}
+\SetKwFor{For}{for}{do}{endfor}
+\SetKwFor{ForPar}{for each}{do}{endfor}
+\SetKw{Swap}{swap}
+\SetKw{Sync}{\_\_syncthreads}
+\SetKwFunction{Min}{min}
+\SetKwFunction{Max}{max}
+
+\Fn{\textsc{KernelStep}$(\texttt{dataToSort}, \texttt{buffer}, \texttt{nbWorkingValues})$}{
+    \For{$\texttt{stepout} \leftarrow 32$ \KwTo $\texttt{nbWorkingValues}-1$ \KwStep $\texttt{stepout} \leftarrow 2\cdot \texttt{stepout}$}{
+        
+        \ForPar{$\texttt{idxVal} \leftarrow \texttt{threadIdx.x}$ \KwTo $\texttt{nbWorkingValues}-1$ \KwStep $\texttt{idxVal} \leftarrow \texttt{idxVal} + \texttt{blockDim.x}$}{
+            $\texttt{idxInStep} \leftarrow \texttt{idxVal} \bmod (2\cdot \texttt{stepout})$\;
+            $\texttt{vecincout} \leftarrow 2\cdot(\texttt{stepout} - \texttt{idxInStep}) - 1$\;
+            $\texttt{vecpermute} \leftarrow \texttt{idxVal} + \texttt{vecincout}$\;
+            $a \leftarrow \texttt{dataToSort[idxVal]}$\;
+            $b \leftarrow \texttt{dataToSort[vecpermute]}$\;
+            $\texttt{best} \leftarrow 
+                \begin{cases}
+                    \Max(a,b) & \text{if } \texttt{idxInStep} \ge \texttt{stepout}\\
+                    \Min(a,b) & \text{otherwise}
+                \end{cases}$\;
+            $\texttt{buffer[idxVal]} \leftarrow \texttt{best}$\;
+        }
+        \Swap{$\texttt{dataToSort}, \texttt{buffer}$}\;
+        \Sync{}\;
+
+        \For{$\texttt{step} \leftarrow \texttt{stepout}/2$ \KwTo $32$ \KwStep $\texttt{step} \leftarrow \texttt{step}/2$}{
+            \ForPar{$\texttt{idxVal} \leftarrow \texttt{threadIdx.x}$ \KwTo $\texttt{nbWorkingValues}-1$ \KwStep $\texttt{idxVal} \leftarrow \texttt{idxVal} + \texttt{blockDim.x}$}{
+                $\texttt{vecinc} \leftarrow \texttt{step}$\;
+                $\texttt{fftt} \leftarrow (\texttt{idxVal} \ \&\  \texttt{step})$\;
+                $\texttt{vecincout2} \leftarrow 
+                    \begin{cases}
+                        -\texttt{vecinc} & \text{if } \texttt{fftt} \neq 0\\
+                        \phantom{-}\texttt{vecinc} & \text{otherwise}
+                    \end{cases}$\;
+                $\texttt{vecpermute} \leftarrow \texttt{idxVal} + \texttt{vecincout2}$\;
+                $a \leftarrow \texttt{dataToSort[idxVal]}$\;
+                $b \leftarrow \texttt{dataToSort[vecpermute]}$\;
+                $\texttt{best} \leftarrow 
+                    \begin{cases}
+                        \Max(a,b) & \text{if } \texttt{fftt} \neq 0\\
+                        \Min(a,b) & \text{otherwise}
+                    \end{cases}$\;
+                $\texttt{buffer[idxVal]} \leftarrow \texttt{best}$\;
+            }
+            \Swap{$\texttt{dataToSort}, \texttt{buffer}$}\;
+            \Sync{}\;
+        }
+    }
+}
+\caption{Bitonic-like compare-exchange stages (CUDA-style, per-block)}
+\end{algorithm}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Experiments}
+\label{sec:experiments}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Experimental Setup}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Results}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Conclusion}
+\label{sec:conclusion}
+
+
+\end{document}
