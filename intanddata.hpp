@@ -12,6 +12,7 @@ struct IntAndData{
 
     __host__ __device__ IntAndData& operator=(const int& v){
         val = v;
+        data = 0; // Integer-generated records must have a defined payload.
         return *this;
     }
 
@@ -30,7 +31,7 @@ struct IntAndData{
     }
 
     // Operator for stream <<
-    __host__ __device__ friend std::ostream& operator<<(std::ostream& os, const IntAndData& obj) {
+    __host__ friend std::ostream& operator<<(std::ostream& os, const IntAndData& obj) {
         os << "{" << obj.val << ", " << obj.data << "}";
         return os;
     }

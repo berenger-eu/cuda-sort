@@ -79,7 +79,7 @@ Let $B$ be the number of threads in the block and $w=32$ the warp size. For the 
 \end{equation}
 These sets are disjoint and cover the array. A warp handles aligned groups of 32 consecutive indices in each round of this traversal. The implementation's full-mask warp operations require all 32 named lanes to participate with valid operands, including lanes holding padding.
 
-A compare--exchange layer is described as one output per logical index. For ordered scalar values, a lower endpoint selects the smaller value and an upper endpoint the larger. For records with equal keys, the endpoint selection must preserve both input records; stability is not required. The code's strict \texttt{min} and \texttt{max} helpers both select their second argument on a tie, so the two endpoints exchange equal-key records. This preserves the pair but does not guarantee stability.
+A compare--exchange layer is described as one output per logical index. For ordered scalar values, a lower endpoint selects the smaller value and an upper endpoint the larger. For records with equal keys, the endpoint selection must preserve both input records; stability is not required. The \texttt{min} and \texttt{max} helpers retain their own endpoint on a tie, so equal-key records do not exchange in that layer. Other comparisons can still change their relative order, so stability is not guaranteed. This tie rule also prevents maximum-key padding from entering the valid prefix.
 
 \subsection*{Direct partner indexing}
 \label{sec:indexing}
@@ -151,7 +151,7 @@ The routine \texttt{Core\_Sort\_1Block\_SM\_gt32\_d} implements the single-array
 
 In the in-place cross-warp layers, each thread reads its own and its partner's values and computes its output in a register. A first block barrier prevents any thread from overwriting shared memory before other threads finish reading the old layer. A second block barrier follows the stores and makes the completed layer available for subsequent reads. This two-barrier requirement is specific to this output-per-thread update schedule. A comparator-per-thread implementation that owns both endpoints has different hazards and can use a different barrier schedule~\citep{nvidiaSortingNetworks}.
 
-The corresponding \texttt{\_v2} routine retains the same one-element-per-thread mapping but alternates two shared-memory arrays. Both routines support shared-memory warp exchanges; for shuffle-compatible types they can instead finish warp-local layers in registers.
+The corresponding \texttt{\_v2} routine retains the same one-element-per-thread mapping but alternates two shared-memory arrays. Both routines support shared-memory warp exchanges; for trivially copyable types they can instead finish warp-local layers in registers using a helper that shuffles each 32-bit word of the value.
 
 \subsection*{Double-buffered shared-memory layers}
 \label{sec:buffers}
@@ -173,7 +173,7 @@ The returned pointer identifies the array containing the final values. Callers c
 \label{sec:multielement}
 The \texttt{Core\_Sort\_1Block\_SM\_gt32\_d\_v3} routine decouples the working length $N$ (\texttt{nbWorkingValues}) from the thread count $B$. It first sorts aligned 32-element groups. For each subsequent cross-warp layer, thread $t$ traverses Equation~\ref{eq:ownership}, computes the direct partner for each logical index, and writes the destination array. A pointer exchange and a block barrier occur after the traversal, before the next layer starts.
 
-Algorithm~\ref{alg:block} gives the schedule for the shuffle-based warp path, with early-exit checks omitted. The source expression for the reflected partner matches the code; the exclusive-or expression for the remaining layers is equivalent to its signed-offset expression. The algorithm requires full participating warps and a type supported by the shuffle operation.
+Algorithm~\ref{alg:block} gives the schedule for the shuffle-based warp path, with early-exit checks omitted. The source expression for the reflected partner matches the code; the exclusive-or expression for the remaining layers is equivalent to its signed-offset expression. The algorithm requires full participating warps and a trivially copyable type supported by the word-wise shuffle helper.
 
 \begin{algorithm}[tb]
 \DontPrintSemicolon
@@ -240,9 +240,9 @@ Block, \texttt{v3} & Several values per thread & $2N$ values & One per layer\\
 \label{tab:variants}
 \end{table}
 
-The code exposes \texttt{TestIfSorted}, \texttt{FullSM}, and asynchronous-copy variants. Sortedness tests can stop at a stage boundary after verifying the complete valid range; their reductions and barriers are additional work. The network derivation and counts above assume these tests are disabled. The \texttt{FullSM} path supports types exchanged through shared memory, whereas the register path requires supported shuffle operands. The asynchronous wrappers change the loading mechanism rather than the sorting network. We make no claim about overlap or the relative efficiency of these options.
+The code exposes \texttt{TestIfSorted}, \texttt{FullSM}, and asynchronous-copy variants. Sortedness tests can stop at a stage boundary after verifying the complete valid range; their reductions and barriers are additional work. The network derivation and counts above assume these tests are disabled. The \texttt{FullSM} path supports types exchanged through shared memory, whereas the register path uses a word-wise shuffle helper to exchange trivially copyable values, including key--payload records. The asynchronous wrappers change the loading mechanism rather than the sorting network. We make no claim about overlap or the relative efficiency of these options.
 
-Padding needs particular care. The supplied \texttt{my\_numeric\_limits\_max} helper uses hard-coded finite floating-point values, rather than positive infinity. Thus, the implementation as supplied does not establish padding correctness for all floating-point inputs: values larger than the sentinel and NaNs require separate handling. For key--payload records, a padding record equal in key to a valid record can also enter the retained prefix because the sort is unstable. A restricted key range or a validity field ordered after all real records is needed for that case. These conditions delimit the correctness argument; arbitrary floating-point and record domains are not assumed to be supported without qualification.
+Padding needs particular care. The \texttt{my\_numeric\_limits\_max} helper uses positive infinity for floating-point types. NaNs require a separately specified ordering and are outside the assumptions here. For key--payload records, padding begins after the valid prefix and compares no smaller than any real key. Because every comparator places the smaller value at the lower index and retains its own endpoint on equality, padding cannot exchange into the valid prefix, including when a real key equals the sentinel key. This property does not imply that the overall sort is stable. Other local sorting baselines may need a distinguishable padding record ordered strictly after valid records.
 
 \section*{Results}
 \label{sec:results}

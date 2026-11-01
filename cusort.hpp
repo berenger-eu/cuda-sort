@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <iostream>
 #include <random>
@@ -259,10 +260,10 @@ __host__ __device__ __forceinline__  constexpr T my_numeric_limits_max(){
         return 2147483647;
     }
     else if constexpr(std::is_same<T, float>::value){
-        return 3.40282e+38; 
+        return std::numeric_limits<float>::infinity();
     }
     else if constexpr(std::is_same<T, double>::value){
-        return 1.79769e+308;
+        return std::numeric_limits<double>::infinity();
     }
     else{
         return T::max();
@@ -275,10 +276,10 @@ __host__ __device__ __forceinline__  constexpr T my_numeric_limits_min(){
         return -2147483648;
     }
     else if constexpr(std::is_same<T, float>::value){
-        return -3.40282e+38;
+        return -std::numeric_limits<float>::infinity();
     }
     else if constexpr(std::is_same<T, double>::value){
-        return -1.79769e+308;
+        return -std::numeric_limits<double>::infinity();
     }
     else{
         return T::min();
@@ -357,6 +358,39 @@ inline __host__ T getPrevVal(const T& val){
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
 
+// CUDA shuffle intrinsics accept scalar operands, not arbitrary records.
+// Exchange all object bytes so key/payload records remain intact. Padding in
+// the last word is zeroed and is never copied into the returned object.
+template <typename T>
+__device__ __forceinline__ T ShuffleValue(unsigned mask, const T& value, int sourceLane) {
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "Warp exchange requires a trivially copyable value");
+    unsigned words[(sizeof(T) + sizeof(unsigned) - 1) / sizeof(unsigned)] = {};
+    memcpy(words, &value, sizeof(T));
+    #pragma unroll
+    for (int idx = 0; idx < int(sizeof(words) / sizeof(unsigned)); ++idx) {
+        words[idx] = __shfl_sync(mask, words[idx], sourceLane);
+    }
+    T result;
+    memcpy(&result, words, sizeof(T));
+    return result;
+}
+
+template <typename T>
+__device__ __forceinline__ T ShuffleUpValue(unsigned mask, const T& value, unsigned delta) {
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "Warp exchange requires a trivially copyable value");
+    unsigned words[(sizeof(T) + sizeof(unsigned) - 1) / sizeof(unsigned)] = {};
+    memcpy(words, &value, sizeof(T));
+    #pragma unroll
+    for (int idx = 0; idx < int(sizeof(words) / sizeof(unsigned)); ++idx) {
+        words[idx] = __shfl_up_sync(mask, words[idx], delta);
+    }
+    T result;
+    memcpy(&result, words, sizeof(T));
+    return result;
+}
+
 // This function tests if values are sorted in a warp
 // each thread holding one value to test
 template <typename T>
@@ -367,7 +401,7 @@ __device__ __forceinline__ bool TestIfSorted_1Warp(const T& dataToSort) {
 
     // Each thread (except lane 0) compares its value with its left neighbor.
     bool isSorted = true;
-    T prev = __shfl_up_sync(mask, dataToSort, 1);
+    T prev = ShuffleUpValue(mask, dataToSort, 1);
     if (lane > 0) {
         isSorted = (prev <= dataToSort);
     }
@@ -423,16 +457,18 @@ __device__ __forceinline__ bool TestIfSorted_1Block_v3(const T* dataToSort, cons
     return isSorted;
 }
 
+// Keep the local endpoint on ties. Besides preserving both equal-key records,
+// this prevents maximum-key padding from swapping into the valid prefix.
 // Get the min between two values
 template <typename T>
 __device__ __forceinline__ T min(const T& a, const T& b){
-    return a < b ? a : b;
+    return b < a ? b : a;
 }
 
 // Get the max between two values
 template <typename T>
 __device__ __forceinline__ T max(const T& a, const T& b){
-    return a > b ? a : b;
+    return a < b ? b : a;
 }
 
 template <typename T>
@@ -449,7 +485,7 @@ __device__ __forceinline__ void swap(T& a, T& b){
 // There might be more threads than 32.
 // If FullSM is used, the shared memory is used to store the values while sorting.
 // Otherwise the values are sorted using warp shuffle.
-// 32 threads are used, the others are return immediately without syncthreads.
+// The first warp sorts; all block threads participate in the final barrier.
 template <typename T, bool TestIfSorted, bool FullSM>
 __device__ __forceinline__ void Core_Sort_1Warp_SM_le32_d(T* dataToSort, const int nbValuesToSort){
     assert(nbValuesToSort <= 32);
@@ -509,7 +545,7 @@ __device__ __forceinline__ void Core_Sort_1Warp_SM_le32_d(T* dataToSort, const i
                         const int ffttout = (threadIdx.x & stepout);
                         vecincout = vecincout + (ffttout? -stepout : stepout);
                         const int vecpermute = (vecincout+laneId);
-                        const T b = __shfl_sync(fullMask, a, vecpermute);
+                        const T b = ShuffleValue(fullMask, a, vecpermute);
                         a = (ffttout ? max(a, b) : min(a, b));
                     }
             
@@ -518,7 +554,7 @@ __device__ __forceinline__ void Core_Sort_1Warp_SM_le32_d(T* dataToSort, const i
                         const int fftt = (threadIdx.x & step);
                         const int vecincout2 = (fftt? -vecinc  : vecinc);
                         const int vecpermute = (vecincout2+laneId);
-                        const T b = __shfl_sync(fullMask, a, vecpermute);
+                        const T b = ShuffleValue(fullMask, a, vecpermute);
                         a = (fftt ? max(a, b) : min(a, b));
                     }
 
@@ -547,7 +583,8 @@ __device__ void Sort_1Warp_SM_le32_d(T* dataToSort, T* output, const int nbValue
     else if(threadIdx.x < 32){
         shared[threadIdx.x] = my_numeric_limits_max<T>();
     }
-    // We do not sync because only the first 32 threads will be used
+    // Publish the initialized shared values before warp readers use them.
+    if(threadIdx.x < 32) __syncwarp(0xffffffff);
     // Sort
     Core_Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(shared, nbValuesToSort);
     // Copy back
@@ -569,11 +606,11 @@ __global__ void Sort_1Warp_SM_le32_outofplace(T* dataToSort, T* output, const in
 }
 
 // Sort at least 32 vales inplace.
-// The number of threads must be multiple of 32 if FullSM is false and warp shuffle is used.
-// Otherwise the number of threads can be any value.
+// One padded value per thread: use a power-of-two block size of at least 32.
 template <typename T, bool TestIfSorted, bool FullSM>
 __device__ __forceinline__ void Core_Sort_1Block_SM_gt32_d(T* dataToSort, const int nbValuesToSort){
-    assert(nbValuesToSort <= blockDim.x);
+    assert(nbValuesToSort > 0 && nbValuesToSort <= blockDim.x);
+    assert(blockDim.x >= 32 && (blockDim.x & (blockDim.x - 1)) == 0);
     if constexpr(FullSM == false){
         assert(blockDim.x%32 == 0);
     }
@@ -623,7 +660,7 @@ __device__ __forceinline__ void Core_Sort_1Block_SM_gt32_d(T* dataToSort, const 
                 const int ffttout = (threadIdx.x & stepout);
                 vecincout = vecincout + (ffttout? -stepout : stepout);
                 const int vecpermute = (vecincout+laneId);
-                const T b = __shfl_sync(fullMask, a, vecpermute);
+                const T b = ShuffleValue(fullMask, a, vecpermute);
                 a = (ffttout ? max(a, b) : min(a, b));
             }
     
@@ -632,7 +669,7 @@ __device__ __forceinline__ void Core_Sort_1Block_SM_gt32_d(T* dataToSort, const 
                 const int fftt = (threadIdx.x & step);
                 const int vecincout2 = (fftt? -vecinc  : vecinc);
                 const int vecpermute = (vecincout2+laneId);
-                const T b = __shfl_sync(fullMask, a, vecpermute);
+                const T b = ShuffleValue(fullMask, a, vecpermute);
                 a = (fftt ? max(a, b) : min(a, b));
             }
         }
@@ -681,7 +718,7 @@ __device__ __forceinline__ void Core_Sort_1Block_SM_gt32_d(T* dataToSort, const 
                 const T a = dataToSort[threadIdx.x];
                 const T b = dataToSort[vecpermute];
                 const T best = (fftt ? max(a, b) : min(a, b));
-                __syncthreads();
+                __syncwarp(0xffffffff);
                 dataToSort[threadIdx.x] = best;
                 __syncwarp(0xffffffff);
             }
@@ -693,7 +730,7 @@ __device__ __forceinline__ void Core_Sort_1Block_SM_gt32_d(T* dataToSort, const 
                 const int fftt = (threadIdx.x & step);
                 const int vecincout2 = (fftt? -vecinc  : vecinc);
                 const int vecpermute = (vecincout2+laneId);
-                const T b = __shfl_sync(fullMask, a, vecpermute);
+                const T b = ShuffleValue(fullMask, a, vecpermute);
                 a = (fftt ? max(a, b) : min(a, b));
             }
             dataToSort[threadIdx.x] = a;
@@ -803,8 +840,10 @@ __global__ void Sort_1Block_async_gt32_extsm(T* dataToSort, const int nbValuesTo
 ////////////////////////////////////////////////////////////////////////
 
 template <typename T, bool TestIfSorted, bool FullSM>
-__device__ __forceinline__ T* Core_Sort_1Block_SM_gt32_d_v2(T* __restrict__ dataToSort, const int nbValuesToSort,
-                                                            T* __restrict__ buffer){
+__device__ __forceinline__ T* Core_Sort_1Block_SM_gt32_d_v2(T* dataToSort, const int nbValuesToSort,
+                                                            T* buffer){
+    assert(nbValuesToSort > 0 && nbValuesToSort <= blockDim.x);
+    assert(blockDim.x >= 32 && (blockDim.x & (blockDim.x - 1)) == 0);
     if constexpr(FullSM == false){
         assert(blockDim.x%32 == 0);
     }
@@ -854,7 +893,7 @@ __device__ __forceinline__ T* Core_Sort_1Block_SM_gt32_d_v2(T* __restrict__ data
                 const int ffttout = (threadIdx.x & stepout);
                 vecincout = vecincout + (ffttout? -stepout : stepout);
                 const int vecpermute = (vecincout+laneId);
-                const T b = __shfl_sync(fullMask, a, vecpermute);
+                const T b = ShuffleValue(fullMask, a, vecpermute);
                 a = (ffttout ? max(a, b) : min(a, b));
             }
     
@@ -863,7 +902,7 @@ __device__ __forceinline__ T* Core_Sort_1Block_SM_gt32_d_v2(T* __restrict__ data
                 const int fftt = (threadIdx.x & step);
                 const int vecincout2 = (fftt? -vecinc  : vecinc);
                 const int vecpermute = (vecincout2+laneId);
-                const T b = __shfl_sync(fullMask, a, vecpermute);
+                const T b = ShuffleValue(fullMask, a, vecpermute);
                 a = (fftt ? max(a, b) : min(a, b));
             }
         }
@@ -924,7 +963,7 @@ __device__ __forceinline__ T* Core_Sort_1Block_SM_gt32_d_v2(T* __restrict__ data
                 const int fftt = (threadIdx.x & step);
                 const int vecincout2 = (fftt? -vecinc  : vecinc);
                 const int vecpermute = (vecincout2+laneId);
-                const T b = __shfl_sync(fullMask, a, vecpermute);
+                const T b = ShuffleValue(fullMask, a, vecpermute);
                 a = (fftt ? max(a, b) : min(a, b));
             }
             dataToSort[threadIdx.x] = a;
@@ -1020,8 +1059,11 @@ __global__ void Sort_1Block_async_gt32_extsm_v2_outofplace(T* dataToSort, T* out
 ////////////////////////////////////////////////////////////////////
 
 template <typename T, bool TestIfSorted, bool FullSM>
-__device__ __forceinline__ T* Core_Sort_1Block_SM_gt32_d_v3(T* __restrict__ dataToSort, const int nbValuesToSort,
-                                                            T* __restrict__ buffer, const int nbWorkingValues){
+__device__ __forceinline__ T* Core_Sort_1Block_SM_gt32_d_v3(T* dataToSort, const int nbValuesToSort,
+                                                            T* buffer, const int nbWorkingValues){
+    assert(nbValuesToSort > 0 && nbValuesToSort <= nbWorkingValues);
+    assert(nbWorkingValues >= 32 && (nbWorkingValues & (nbWorkingValues - 1)) == 0);
+    assert(blockDim.x >= 32 && blockDim.x % 32 == 0);
     if constexpr(FullSM == false){
         assert(blockDim.x%32 == 0);
     }
@@ -1069,6 +1111,9 @@ __device__ __forceinline__ T* Core_Sort_1Block_SM_gt32_d_v3(T* __restrict__ data
                 }
             }
         }
+        // Fifteen warp-local layers exchange buffers an odd number of times.
+        // Idle warps must keep the same current-buffer identity as active ones.
+        if(threadIdx.x >= nbWorkingValues) swap(dataToSort, buffer);
     }
     else{
         for(int idxVal = threadIdx.x ; idxVal < nbWorkingValues ; idxVal += blockDim.x){    
@@ -1079,7 +1124,7 @@ __device__ __forceinline__ T* Core_Sort_1Block_SM_gt32_d_v3(T* __restrict__ data
                     const int ffttout = (idxVal & stepout);
                     vecincout = vecincout + (ffttout? -stepout : stepout);
                     const int vecpermute = (vecincout+laneId);
-                    const T b = __shfl_sync(fullMask, a, vecpermute);
+                    const T b = ShuffleValue(fullMask, a, vecpermute);
                     a = (ffttout ? max(a, b) : min(a, b));
                 }
         
@@ -1088,7 +1133,7 @@ __device__ __forceinline__ T* Core_Sort_1Block_SM_gt32_d_v3(T* __restrict__ data
                     const int fftt = (idxVal & step);
                     const int vecincout2 = (fftt? -vecinc  : vecinc);
                     const int vecpermute = (vecincout2+laneId);
-                    const T b = __shfl_sync(fullMask, a, vecpermute);
+                    const T b = ShuffleValue(fullMask, a, vecpermute);
                     a = (fftt ? max(a, b) : min(a, b));
                 }
             }
@@ -1150,6 +1195,8 @@ __device__ __forceinline__ T* Core_Sort_1Block_SM_gt32_d_v3(T* __restrict__ data
                     __syncwarp(0xffffffff);
                 }
             }
+            // The five warp-local tail layers also have odd buffer parity.
+            if(threadIdx.x >= nbWorkingValues) swap(dataToSort, buffer);
         }
         else{
             for(int idxVal = threadIdx.x ; idxVal < nbWorkingValues ; idxVal += blockDim.x){
@@ -1159,7 +1206,7 @@ __device__ __forceinline__ T* Core_Sort_1Block_SM_gt32_d_v3(T* __restrict__ data
                     const int fftt = (idxVal & step);
                     const int vecincout2 = (fftt? -vecinc  : vecinc);
                     const int vecpermute = (vecincout2+laneId);
-                    const T b = __shfl_sync(fullMask, a, vecpermute);
+                    const T b = ShuffleValue(fullMask, a, vecpermute);
                     a = (fftt ? max(a, b) : min(a, b));
                 }
                 dataToSort[idxVal] = a;
@@ -1802,17 +1849,17 @@ template <typename T, bool TestIfSorted, bool FullSM, bool ASyncCpyBito>
 __global__ void SortOnePartition(T* dataToSort, const int size){
     assert(size <= ComputeDefaultMaxBitoSort<T>());
     if(size <= 32){
-        Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(dataToSort, size);
+        Sort_1Warp_SM_le32_d<T, TestIfSorted, FullSM>(dataToSort, dataToSort, size);
         __syncthreads();
     }
     else if(size <= ComputeDefaultMaxBitoSort<T>()){
         const int NOrPow2 = GreaterPowerOf2EqualOrLarger(size);
         assert(NOrPow2 <= ComputeDefaultMaxBitoSort<T>());
         if constexpr(ASyncCpyBito){
-            Sort_1Block_async_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort, size, NOrPow2);
+            Sort_1Block_async_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort, dataToSort, size, NOrPow2);
         }
         else{
-            Sort_1Block_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort, size, NOrPow2);
+            Sort_1Block_gt32_d_extsm_v3<T, TestIfSorted, FullSM>(dataToSort, dataToSort, size, NOrPow2);
         }
     }
 }
