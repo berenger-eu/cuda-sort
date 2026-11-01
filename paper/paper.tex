@@ -1,344 +1,258 @@
-\documentclass{article}
-\usepackage{graphicx} % Required for inserting images
+% PeerJ review manuscript, using the supplied Overleaf/PeerJ class.
+\documentclass[fleqn,10pt,lineno]{wlpeerj}
 \usepackage{url}
+\usepackage[ruled,vlined]{algorithm2e}
+\newcommand{\xor}{\mathbin{\oplus}}
+\newcommand{\band}{\mathbin{\&}}
 
-\title{Bitonic-based sort on GPU: tuning and optimizations}
-\author{berenger.bramas }
-\date{December 2025}
+\title{Small-array bitonic sorting in CUDA: direct partner indexing and double-buffered shared memory}
+\author{B\'erenger Bramas}
+% TODO(author): supply the affiliation and corresponding-author email.
+% \affil[1]{Author affiliation}
+% \corrauthor[1]{B\'erenger Bramas}{email address}
+
+\begin{abstract}
+Sorting arrays that fit within a CUDA thread block requires a balance between communication, synchronization, and on-chip storage. This paper describes a bitonic sorting implementation for this setting, from a single warp to arrays containing more elements than the block has threads. Its central design is an explicit mapping from an element index and a network stage to the compare--exchange partner. A reflected index starts each merge of two ascending runs, followed by exclusive-or partners for the remaining merge layers. We derive this mapping from the accumulated-offset formulation used in the one-element-per-thread kernels, allowing the multiple-elements-per-thread kernel to compute each partner independently. The implementation combines warp-local exchanges with shared-memory communication across warps. For shared-memory layers, alternating source and destination buffers removes the read-before-overwrite barrier required by the element-per-thread in-place implementation, while retaining a barrier before the next dependent layer. This reduces the barrier count of those layers from two to one at the cost of doubling their shared-memory array storage. We describe the CUDA mappings, establish the network invariants, and analyze the storage and synchronization trade-offs. The contribution is an implementation and its formulation; performance evaluation is reserved for a subsequent stage of the study.
+\end{abstract}
 
 \begin{document}
-
+\flushbottom
 \maketitle
+\thispagestyle{empty}
 
-\section{Abstract}
+\section*{Introduction}
+\label{sec:introduction}
+Sorting short arrays is a useful local operation in GPU applications and in larger sorting pipelines. Here, ``small'' means that a padded array and the working storage of its sorting kernel fit in the shared memory available to a single CUDA thread block. This definition is relative to the element type, storage strategy, and target device. An array can therefore be small in this sense while containing more elements than a block can execute threads.
 
+Sorting networks are well suited to this scope because their communication pattern depends on indices rather than input values. Batcher's bitonic construction provides a regular sequence of compare--exchange layers~\citep{batcher1968sorting}. GPU implementations have long exploited this regularity, and sorting networks are established choices for short arrays~\citep{kipfer2005improved,nvidiaSortingNetworks}. Their practical design nevertheless involves choices about index computation, thread ownership, communication, and synchronization.
 
-\section{Introduction}
+This paper studies the small-array kernels in our CUDA implementation. Its organizing idea is to express a compare--exchange partner directly as a function of the logical element index and the current network stage. The starting point is a kernel that maintains an accumulated partner offset while each thread owns one element. We derive an equivalent reflected-index formula that removes that state dependency. Each thread can then visit several logical indices in a strided loop and compute the partner for each one independently. The network still executes successive dependent layers; direct indexing removes the recurrence in address calculation, not the iteration through the sorting network.
 
-Sorting is a fundamental operation in computer science with applications spanning numerous domains such as data analysis, computer graphics, and scientific computing. Improving the performance of sorting algorithms on modern hardware architectures has significant implications for the efficiency of a wide range of applications, particularly when dealing with large-scale datasets. In recent years, Graphics Processing Units (GPUs) have emerged as powerful platforms for parallel computing, offering massive computational throughput and becoming the standard architecture for high-performance computing systems, including the largest supercomputers in the world~\footnote{\url{https://www.top500.org}}.
+A second design choice concerns shared-memory updates. When each thread computes only its own output, an in-place layer needs to protect the old values until all participating threads have read them, then make the new values available to the next layer. Our double-buffered kernels read one array and write another, retaining only the latter synchronization requirement. The additional array doubles shared-memory array storage and may reduce resident block count or the maximum sortable array size. These are explicit design trade-offs rather than an unconditional performance improvement.
 
-Despite their computational potential, designing efficient sorting algorithms for GPUs remains challenging due to issues such as load balancing, parallel memory access patterns, synchronization overhead, and element-wise dependencies. Consequently, providing high-performance GPU sorting algorithms has been an active area of research. Most existing implementations are based on well-known parallel sorting techniques, including radix sort, merge sort, and bitonic sort, each presenting distinct trade-offs in terms of performance, implementation complexity, and adaptability.
-
-Among these, bitonic sort is particularly attractive for GPU architectures because of its regular structure and predictable memory access patterns, which facilitate efficient parallelization and optimization. Building on these properties, this paper presents Bicuso Sort, a novel GPU-based sorting algorithm inspired by bitonic principles. The objectives of Bicuso Sort are to define a sorting method that is efficient on modern GPU architectures, easy to implement, and adaptable to various data types and problem sizes.
-
-We explore the implementation and optimization of this bitonic-based approach on GPUs, focusing on tuning techniques and original optimization strategies. A comprehensive performance analysis is provided, including the impact of memory coalescing, shared memory utilization, and kernel launch configurations. By leveraging the massive parallelism of GPUs, we aim to achieve substantial speedups over traditional CPU-based sorting algorithms while maintaining simplicity and scalability.
-
-The contributions of this paper are as follows:
-\begin{itemize}
-    \item We introduce Bicuso Sort, a new GPU-based sorting algorithm that combines block-level sorting with multi-partitioning and merging techniques to achieve high performance;
-    \item We present an optimized implementation of the bitonic sort algorithm for small arrays that fit in shared memory;
-    \item We describe a sorting implementation that use multi-partitioning and bitonic sort to efficiently sort large arrays on GPUs;
-    \item We conduct a thorough performance evaluation, comparing our bitonic sort implementation against traditional sorting algorithms on GPUs, demonstrating its efficiency and scalability.
+The contributions are:
+\begin{itemize}[noitemsep]
+\item a derivation of the direct reflected and exclusive-or partner expressions used by the implementation, with an explanation of their relationship to the accumulated-offset kernels;
+\item a CUDA mapping spanning warp-local sorting, one element per thread, and several elements per thread within a single block;
+\item an account of the double-buffered layer schedule, including its correctness conditions, remaining synchronization, and shared-memory cost.
 \end{itemize}
+The contribution is the concrete implementation and its explanation. We do not claim a new sorting-network family, a new asymptotic bound, or the first use of direct index arithmetic or double buffering on GPUs. Multipartitioning and device-wide sorting are outside the scope of this paper. No throughput or speedup claims are made in this draft.
 
-The paper is organized as follows: Section~\ref{sec:related_work} reviews related work in GPU sorting algorithms. Section~\ref{sec:background} provides background information on GPU architectures and parallel sorting techniques. Section~\ref{sec:bicuso_sort} details the design and implementation of the Bicuso Sort algorithm. Section~\ref{sec:experiments} presents experimental results and performance comparisons. Finally, Section~\ref{sec:conclusion} concludes the paper and discusses future work.
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\section{Background}
-\label{sec:background}
-
-\subsection{GPU Architecture Overview}
-
-GPUs were originally designed for rendering graphics, but their highly parallel structure makes them well-suited for general-purpose computing tasks.
-The major milestone that made it possible has been the creation of programming models such as CUDA~\footnote{\url{https://developer.nvidia.com/cuda-zone}} and OpenCL~\footnote{\url{https://www.khronos.org/opencl/}}, which allow developers to write code that can be executed on GPUs.
-CUDA, developed by NVIDIA, provides a C/C++-like programming environment for writing parallel code that can run on NVIDIA GPUs.
-It has become the de facto standard for GPU programming due to its ease of use and extensive support for various GPU features.
-
-The architecture of modern GPUs consists of multiple Streaming Multiprocessors (SMs), each containing a computation core, shared memory, and various caches.
-Each SM can execute multiple threads concurrently, and schedule memory accesses and computation to increase throughput.
-The number of threads that can be executed simultaneously is limited by the available resources and by kernel-tied limitations, such as shared memory and register usage
-
-CUDA is a programming model that at the same time map and abstract the GPU hardware.
-In CUDA, the computation is parallelized across a large number of lightweight threads organized into blocks and grids.
-Each thread executes the same kernel function but is expected to operate on different data elements.
-Threads within a block can communicate and synchronize using shared memory, which is a fast, low-latency memory space.
-Global memory, on the other hand, is accessible by all threads but has higher latency.
-Warps are groups of 32 threads that execute instructions in lockstep, meaning they execute the same instruction simultaneously, which is part of the SIMD (Single Instruction, Multiple Data) model, but called SIMT (Single Instruction, Multiple Threads) in CUDA terminology.
-Threads of the same warp should ideally follow the same execution path to avoid divergence.
-On the other hand, they can use special instructions to perform collective operations, such as warp-level shuffles, which allow threads within a warp to exchange data without using shared memory.
-
-Synchronization between threads within a block is usually needed to ensure correctness, and is expected to be cheap but not free.
-However, synchronization between different blocks is much more costly, as it requires kernel launches and global memory accesses, and should be avoided when possible.
-
-\subsection{Sorting Algorithms}
-
-Sorting an array of elements consists in rearranging the elements in a specific order, typically ascending or descending.
-The complexities of sorting algorithms are usually expressed in terms of time and space.
-Time complexity refers to the relationship between the size of the input and the number of operations required to sort it, while space complexity refers to the amount of additional memory required by the algorithm.
-Worst-case and average-case complexities are usually considered to compare sorting algorithms, but in the end, the actual performance on specific hardware and data distributions is what matters.
-
-Common sorting algorithms include quicksort, mergesort, heapsort, and radix sort.
-Quicksort is a divide-and-conquer algorithm that selects a pivot element and partitions the array into two sub-arrays, one with elements less than the pivot and another with elements greater than the pivot.
-Mergesort is another divide-and-conquer algorithm that recursively divides the array into halves, sorts each half, and then merges the sorted halves.
-Heapsort builds a binary heap from the input array and repeatedly extracts the maximum element to build the sorted array.
-Radix sort is a non-comparative sorting algorithm that processes the digits of the numbers, sorting them based on each digit from the least significant to the most significant.
-
-The divide-and-conquer paradigm is particularly well-suited for parallelization on CPU, as it allows different parts of the array to be sorted independently.
-However, on GPUs, the synchronizations is extrmly costly between thread blocks, making it challenging to implement the first steps of these algorithms efficiently.
-
-Mergesort appears as a better candidate for GPU implementation, as the merging step can be parallelized effectively.
-However, the recursive nature of mergesort can lead to significant overhead due to multiple kernel launches and memory transfers between global and shared memory.
-
-On the other hand, sorting networks, such as bitonic sort and odd-even mergesort, are designed for parallel architectures and can be implemented efficiently on GPUs because they consist of a fixed sequence of compare-and-swap operations that can be executed in parallel.
-Bitonic sort is based on the concept of bitonic sequences, which are sequences that first increase and then decrease, or can be circularly shifted to form such a sequence.
-The bitonic sort algorithm consists of two main phases: the bitonic merge and the bitonic sort.
-The bitonic merge takes a bitonic sequence and rearranges it into a sorted sequence by performing a series of compare-and-swap operations.
-The bitonic sort builds bitonic sequences from unsorted data and then applies the bitonic merge to sort the entire array.
-Bitonic sort is particularly attractive for GPU architectures because of its regular structure and predictable memory access patterns, which facilitate efficient parallelization and optimization.
-
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\section{Related Work}
+\section*{Related work}
 \label{sec:related_work}
+\subsection*{Bitonic networks on GPUs}
+Batcher introduced bitonic and odd--even merging networks~\citep{batcher1968sorting}. Their fixed layer structure underlies many later parallel sorting implementations. The present work uses a formulation in which two ascending runs are combined by comparing reflected positions before applying the usual halving-distance merge layers. This is a way of expressing a bitonic merge, rather than a different complexity class of sorting algorithm.
 
-Sorting on massively parallel GPUs has been extensively studied, with research spanning comparison-based sorting networks, merge-based approaches, distribution-based methods such as radix and sample sort, and hybrid combinations that attempt to balance parallelism, memory efficiency, and load balance. Surveys of parallel sorting literature classify GPU methods primarily into merge-sort variants, radix-sort variants, and other hybrid or network-based techniques, while further distinguishing works by optimization strategy such as load balancing, cache efficiency, reduction of bank conflicts, and computational complexity reduction \cite{yu2022survey}.
+\citet{kipfer2005improved} described GPU sorting-network implementations before CUDA, including arithmetic for locating comparison partners and mapping network passes onto graphics hardware. Their discussion also uses separate input and output buffers. It establishes that partner arithmetic and alternating storage have a substantial history in GPU sorting. The CUDA-specific issue examined here is how alternating shared-memory arrays change the barriers required by a block-level, element-output mapping.
 
-\subsection{GPU Merge-Based Sorting}
+\citet{peters2011bitonic} studied fast in-place comparison-based sorting with CUDA using bitonic sort. This is a close precedent for optimizing bitonic execution on CUDA and makes the storage strategy an important distinction: our double-buffered variants deliberately spend additional shared memory to simplify layer updates. NVIDIA's sorting-networks sample is another direct baseline~\citep{nvidiaSortingNetworks}. It computes comparator endpoints from the thread index and stride, with a thread updating both endpoints. Thus, direct endpoint calculation is already established; our formulation instead assigns logical outputs to threads and derives their partners independently, including when several outputs belong to a thread.
 
-Merge-based sorting has long been attractive for parallel architectures due to its regular structure and deterministic behavior. Early parallel merge formulations focused on balanced decomposition of the merge operation, culminating in the Merge Path framework, which provides a simple yet effective way to partition two sorted sequences into independent merge tasks with equal work \cite{odeh2012mergepath}. This technique was later adapted specifically for GPUs, enabling high-throughput parallel merging and forming a building block for GPU merge sort pipelines \cite{bader2013gpumergepath}.
+\subsection*{Warp cooperation and local sorting primitives}
+GPU-Warpsort combines warp-level bitonic sorting with merging~\citep{ye2010warpsort}. It demonstrates that local bitonic sorting and warp cooperation are established implementation techniques. Modern CUDA code must follow the documented synchronization rules rather than assume that independent threads always progress in lockstep~\citep{nvidiaCudaGuide}. We use synchronized shuffles for register exchanges and explicit warp or block barriers for shared-memory dependencies.
 
-Several GPU implementations build full sorting systems around merge primitives. Satish et al.\ present high-performance GPU merge and merge-sort routines that emphasize memory coalescing, thread-level parallelism, and hierarchical merging \cite{satish2009designing}. Panwar et al.\ propose GPU Matrix Sort, an approach that reshapes input data into matrices, sorts rows in parallel, and recursively merges rows, effectively mapping merge sort onto GPU-friendly structures \cite{panwar2014matrixsort}. OpenCL implementations of odd-even merge sort further demonstrate the practicality of merge networks on GPU architectures \cite{zhang2011oddeven}.
+CUB, distributed with the CUDA Core Compute Libraries, provides both \texttt{WarpMergeSort} and \texttt{BlockMergeSort}, including mappings with multiple items per thread~\citep{nvidiaCubWarpMergeSort,nvidiaCubBlockMergeSort}. These primitives are relevant local comparison-sort baselines. Multiple items per thread and warp/block specialization are therefore context for this work, rather than standalone novelty claims.
 
-While merge-based approaches provide predictable performance and strong worst-case bounds, they often suffer from heavy global memory traffic and require careful partitioning to maintain load balance at scale.
+\subsection*{Relationship to larger sorting systems}
+\citet{satish2009designing} developed GPU radix-sort and merge-sort routines using on-chip shared memory and data-parallel primitives. Such work addresses complete sorting systems and provides context for local sorting kernels. Our scope is narrower: a single array is sorted within a block, with no partition construction, inter-block merge, or global ordering phase. A local kernel can be a building block in a larger algorithm, but that composition and its efficiency are not evaluated here.
 
-\subsection{Sorting Networks and Bitonic-Based Methods}
+\section*{Materials and methods}
+\label{sec:methods}
+\subsection*{Problem definition and execution assumptions}
+We sort $n\geq 1$ values in ascending order. Let $N$ be the working length after padding to a power of two; the warp implementation uses $N=32$ even when $n<32$. For block kernels we use $N\geq32$. Padding values must compare no smaller than every valid input. Only the first $n$ sorted positions are copied back. Empty-array handling belongs to the caller.
 
-Sorting networks, including bitonic and odd-even networks, are attractive on GPUs because they avoid control-flow divergence and use fixed communication patterns. Hybrid odd-even merge sort variants and optimized pairwise merge networks have been implemented on GPUs, showing good performance for moderate problem sizes and regular data layouts \cite{zhang2011oddeven, berney2020engineering}.
+Let $B$ be the number of threads in the block and $w=32$ the warp size. For the multiple-elements-per-thread mapping, we assume $B$ is a multiple of $w$, $B\leq N$, and the working set fits the permitted shared-memory allocation. Thread $t$ owns the logical indices
+\begin{equation}
+\mathcal{I}_t=\{t+kB\mid k\geq0,\ t+kB<N\}.
+\label{eq:ownership}
+\end{equation}
+These sets are disjoint and cover the array. A warp handles aligned groups of 32 consecutive indices in each round of this traversal. The implementation's full-mask warp operations require all 32 named lanes to participate with valid operands, including lanes holding padding.
 
-However, classical bitonic and odd-even networks exhibit \(O(n \log^2 n)\) work complexity, making them less competitive for large inputs compared to merge- or distribution-based algorithms. As a result, recent work often embeds sorting networks inside larger frameworks, using them for small-tile sorting or as building blocks inside hybrid algorithms.
+A compare--exchange layer is described as one output per logical index. For ordered scalar values, a lower endpoint selects the smaller value and an upper endpoint the larger. For records with equal keys, the endpoint selection must preserve both input records; stability is not required. The code's strict \texttt{min} and \texttt{max} helpers both select their second argument on a tie, so the two endpoints exchange equal-key records. This preserves the pair but does not guarantee stability.
 
-\subsection{Distribution-Based and Hybrid GPU Sorting}
+\subsection*{Direct partner indexing}
+\label{sec:indexing}
+Let $s$ be a power of two. At the start of a stage, each aligned run of length $s$ is ascending. The stage combines pairs of these runs into ascending runs of length $2s$. For logical index $i$, define
+\begin{equation}
+ r=i\bmod(2s),\qquad q=i-r.
+\end{equation}
+The first partner reflects the position within its length-$2s$ group:
+\begin{align}
+ p_s(i)&=q+(2s-1-r)\label{eq:reflection}\\
+       &=i+2(s-r)-1\label{eq:offset}\\
+       &=i\xor(2s-1).\label{eq:reflectionxor}
+\end{align}
+Equation~\ref{eq:offset} is the expression used in the multiple-elements-per-thread kernel. Because $2s$ is a power of two, taking the remainder extracts the low-order bits, and Equation~\ref{eq:reflectionxor} complements those bits. The exclusive-or form is an algebraic equivalent, not a claim about which instructions the compiler emits for the source expression.
 
-Radix sort is one of the most widely used GPU sorting techniques due to its linear-time complexity and high throughput \cite{satish2009designing}. Sample sort and hybrid sample/merge strategies further attempt to combine distribution-based partitioning with merge-based refinement \cite{leischner2010gpusamplesort, sintorn2008hybrid}.
+After this reflected layer, the remaining merge layers use distances $d=s/2,s/4,\ldots,1$. Their partners are
+\begin{equation}
+ p_d(i)=i\xor d
+ =\begin{cases}i+d,&(i\band d)=0,\\i-d,&(i\band d)\ne0.\end{cases}
+\label{eq:xor}
+\end{equation}
+In the reflected layer, output $i$ keeps the minimum if $r<s$ and the maximum otherwise. In a distance-$d$ layer, it keeps the minimum if $(i\band d)=0$ and the maximum otherwise. Equivalently, in either layer the lower-indexed endpoint retains the minimum.
 
-Hybrid GPU sorting algorithms combine multiple paradigms to exploit their complementary strengths. Sintorn and Assarsson integrate bucket-based partitioning with local sorting and merging \cite{sintorn2008hybrid}, while Satish et al.\ mix radix sorting with merge-based postprocessing \cite{satish2009designing}. Resource-oblivious hybrid strategies interleave merge and sample sort to mitigate worst-case overheads and improve scalability \cite{nyu2017resourceoblivious}.
+\paragraph{Derivation from the accumulated offset.}
+The one-element-per-thread routines initialize an offset $v$ to zero and, for successive outer stages $h=1,2,4,\ldots,s$, update it by adding $h$ when $(i\band h)=0$ and subtracting $h$ otherwise. The successive values of $h$ here are powers of two. At stage $s$,
+\begin{equation}
+ v_s(i)=\sum_{h\in\{1,2,4,\ldots,s\}}\bigl(h-2(i\band h)\bigr)
+       =(2s-1)-2\bigl(i\bmod(2s)\bigr).
+\label{eq:recurrence}
+\end{equation}
+Consequently $i+v_s(i)=p_s(i)$. The direct formula gives the same partner without reconstructing the previous offset updates for that logical index. This is useful when the outer loop is over network layers and the inner loop visits $i=t,t+B,\ldots$. Carrying one thread-local offset from one visited index to another would mix different logical positions.
 
-Despite these advances, existing hybrid methods typically combine distribution-based partitioning with radix or sample sort, rather than integrating sorting networks with merge-driven global ordering.
+An iterative implementation remains possible by keeping per-element state or recomputing the recurrence. Direct indexing avoids those choices. It does not change the dependency between consecutive layers or eliminate the network's $O(\log^2N)$ depth.
 
-\subsection{Positioning of This Work}
+\begin{table}[tb]
+\centering
+\begin{tabular}{lrrrrrrrr}
+\toprule
+Logical index $i$ & 0&1&2&3&4&5&6&7\\
+\midrule
+Reflected partner, $s=4$ &7&6&5&4&3&2&1&0\\
+Merge partner, $d=2$ &2&3&0&1&6&7&4&5\\
+Merge partner, $d=1$ &1&0&3&2&5&4&7&6\\
+\bottomrule
+\end{tabular}
+\caption{Partner indices for the stage that merges two ascending runs of length four. Each row is an involution: partners select each other. The lower endpoint retains the minimum and the upper endpoint the maximum.}
+\label{tab:partners}
+\end{table}
 
-In contrast to prior approaches, our method explicitly couples bitonic sorting with partitioning and merge-based composition. Bitonic networks are employed for efficient local ordering and predictable intra-block behavior, while global ordering is achieved through partitioning and parallel merging.
+\subsection*{Network correctness and work}
+\label{sec:correctness}
+For two ascending runs $A$ and $C$ of length $s$, the conceptual sequence $A$ followed by the reverse of $C$ is bitonic. Its first bitonic-merge comparisons pair $A_j$ with $C_{s-1-j}$. Equation~\ref{eq:reflection} implements precisely those pairs without physically reversing the second run. The lower half receives the smaller members in forward order; the upper half receives the larger members in the reverse of the conceptual arrangement. The two halves are bitonic, with every lower-half value no greater than any upper-half value. Each half can then be sorted by the halving-distance bitonic merge. Reversal does not alter this argument because a reversed bitonic sequence is also bitonic.
 
-This design occupies a middle ground between network-based and merge-based GPU sorting. Unlike pure sorting-network approaches, it scales beyond small tiles through hierarchical merging. Unlike traditional merge-sort pipelines, it leverages the deterministic structure of bitonic sorting to simplify local ordering and reduce control divergence.
+The invariant follows by induction: length-one runs are sorted, and each stage turns adjacent ascending length-$s$ runs into ascending length-$2s$ runs. At $s=N/2$, the whole working array is sorted. Both partner maps are in-range involutions with distinct endpoints, and their endpoint rules are complementary. With pair-preserving tie handling, every layer preserves the input multiset. Valid padding then leaves the sorted scalar input in the first $n$ positions.
 
-To the best of our knowledge, this specific combination of bitonic sorting with partition-driven merging has not been systematically explored in existing GPU sorting frameworks, which primarily emphasize radix-merge or sample-merge hybrids. Our work therefore contributes a new hybrid design point in the GPU sorting design space.
+For $N=2^m$, stage $s=2^k$ contains $k+1$ layers, giving
+\begin{equation}
+ L(N)=\sum_{k=0}^{m-1}(k+1)=\frac{m(m+1)}{2}.
+\end{equation}
+There are $N/2$ comparator pairs per layer and $NL(N)/2$ network comparators. Our output-per-index implementation evaluates a selection at both endpoints, rather than assigning one thread to execute a pair once. Its total selection work remains $O(N\log^2N)$; the nominal per-thread work is $O(\lceil N/B\rceil\log^2N)$, excluding communication and synchronization costs.
 
+\subsection*{Warp-local sorting}
+The routine \texttt{Core\_Sort\_1Warp\_SM\_le32\_d} sorts 32 working positions using the first warp of a block. For fewer than 32 valid inputs, the remaining lanes hold padding. The register variant loads one value per lane, obtains partner values with \texttt{\_\_shfl\_sync}, and retains its selected output in a register. Only the final values are stored back. Within this group the partners from Equations~\ref{eq:reflection} and~\ref{eq:xor} remain within the same warp.
 
+The \texttt{FullSM} variant exchanges through shared memory. Its in-place warp layers separate reads from overwriting stores and then order the next reads with \texttt{\_\_syncwarp}. The shuffle path avoids this shared-memory exchange traffic. Synchronized shuffle instructions exchange registers; they are not general shared-memory fences~\citep{nvidiaCudaGuide}. Shared-memory initialization and handoffs must still be ordered at the appropriate scope. The implementation also has block barriers at routine boundaries, so warp-local sorting should not be described as making the enclosing routine synchronization-free.
 
+\subsection*{One element per thread}
+The routine \texttt{Core\_Sort\_1Block\_SM\_gt32\_d} implements the single-array block variant. The launch must provide the padded working positions, with one element per thread. It first sorts each warp's 32-element group. A block barrier then makes these sorted groups available for stages $s=32,64,\ldots$. Each such stage begins with the reflected comparison, continues through cross-warp distances down to 32, and finishes with warp-local distances 16 through 1.
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\section{Sorting small arrays using bitonic sort}
-\label{sec:bicuso_sort}
+In the in-place cross-warp layers, each thread reads its own and its partner's values and computes its output in a register. A first block barrier prevents any thread from overwriting shared memory before other threads finish reading the old layer. A second block barrier follows the stores and makes the completed layer available for subsequent reads. This two-barrier requirement is specific to this output-per-thread update schedule. A comparator-per-thread implementation that owns both endpoints has different hazards and can use a different barrier schedule~\citep{nvidiaSortingNetworks}.
 
+The corresponding \texttt{\_v2} routine retains the same one-element-per-thread mapping but alternates two shared-memory arrays. Both routines support shared-memory warp exchanges; for shuffle-compatible types they can instead finish warp-local layers in registers.
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%
-\subsection{Sorting within a block}
+\subsection*{Double-buffered shared-memory layers}
+\label{sec:buffers}
+Let $S$ and $D$ be disjoint shared-memory arrays of length $N$. At entry to a layer, all source values in $S$ must be available to the participating threads. The layer computes
+\begin{equation}
+ D[i]=\begin{cases}
+ \min(S[i],S[p(i)]),&i<p(i),\\
+ \max(S[i],S[p(i)]),&i>p(i).
+ \end{cases}
+\label{eq:layer}
+\end{equation}
+Each output has exactly one writer. Since no store touches $S$, a thread can write its output while another thread is still reading the source. This removes the read-before-overwrite barrier. After all outputs are written, threads exchange their local source/destination pointers and execute a barrier before consuming the new source. Pointer exchange alone does not synchronize memory.
 
-In this section, we describe how to sort arrays that can fit in shared memory using bitonic sort.
-We propose different implementations depending on the size of the array, and we use these kernels as building blocks for sorting larger arrays.
+For cross-warp layers this is a block barrier. For layers confined to aligned warp groups, the shared-memory variant can use a warp barrier, with a block barrier at the next handoff to cross-warp work. The barrier completing a layer also prevents reuse of the old source as a destination before all its readers have completed. Double buffering therefore removes one barrier per affected in-place layer; it does not remove synchronization between dependent layers.
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%
-\subsubsection{Sorting small arrays (<=32 elements)}
+The returned pointer identifies the array containing the final values. Callers copy from this pointer because the active array depends on the number of exchanges, including exchanges made during warp-local shared-memory layers. Assuming the original pointer is always current would be incorrect.
 
-When the number of elements to sort is less than or equal to the number of threads in a warp (32), we can use the shuffle instructions to perform the compare-exchange operations without using shared memory and we can synchronize only the threads of the warp where needed.
-We provide the pseudo code in Algorithm~\ref{alg:warp_bitonic}.
-In this case, each thread can be seen as a vector element, which corresponds at a line in the bitonic network.
-In terms of synchronization, the main principle is that each thread loads the value from its position and a value and put it into its register, then we need such that after a synchronization point, threads can overwrite the array with the values stored in their registers.
+\subsection*{Several elements per thread}
+\label{sec:multielement}
+The \texttt{Core\_Sort\_1Block\_SM\_gt32\_d\_v3} routine decouples the working length $N$ (\texttt{nbWorkingValues}) from the thread count $B$. It first sorts aligned 32-element groups. For each subsequent cross-warp layer, thread $t$ traverses Equation~\ref{eq:ownership}, computes the direct partner for each logical index, and writes the destination array. A pointer exchange and a block barrier occur after the traversal, before the next layer starts.
 
-This device routine implements a warp-level sorting network for up to 32 elements, with a one-to-one mapping between elements and warp lanes. 
+Algorithm~\ref{alg:block} gives the schedule for the shuffle-based warp path, with early-exit checks omitted. The source expression for the reflected partner matches the code; the exclusive-or expression for the remaining layers is equivalent to its signed-offset expression. The algorithm requires full participating warps and a type supported by the shuffle operation.
 
-Execution is restricted to the first warp of the block (\texttt{threadIdx.x < 32}), assuming \texttt{nbValuesToSort $\leq$ 32}. The algorithm follows a bitonic-style compare--exchange network: an outer loop (\texttt{stepout}, doubling from 1 to 16) constructs the bitonic merge pattern, while an inner loop (\texttt{step}, halving down to 1) completes the local ordering. At each stage, the partner index is derived from the lane bit pattern and an accumulated offset, and each lane retains either the minimum or maximum of the two values depending on the sorting direction implied by the current bit. Two implementations are provided. The shared-memory variant explicitly stores intermediate results in \texttt{dataToSort[]} and enforces intra-warp ordering with \texttt{\_\_syncwarp} between read, compare, and write phases. The register-based variant avoids shared memory by holding the element in a register and performing lane-to-lane exchanges using \texttt{\_\_shfl\_sync}, committing the result to memory only once at the end. 
-
-\begin{algorithm}[t]
+\begin{algorithm}[tb]
 \DontPrintSemicolon
-\SetKwInOut{Input}{Input}
-\SetKwInOut{Output}{Output}
-
-\Input{$dataToSort[0..31]$ : array of 32 elements distributed one per lane}
-\Output{$dataToSort$ sorted within the warp (bitonic-style network)}
-
-\BlankLine
-\KwData{$fullMask \gets \texttt{0xFFFFFFFF}$}
-$a \gets dataToSort[lane]$ \tcp*{$lane \in \{0,\dots,31\}$ is the warp lane id}
-$vecincout \gets 0$ \tcp*{assumed initialized before the loop (your code updates it)}
-
-\For{$stepout \gets 1$ \KwTo $31$ \KwStep $stepout \gets 2\cdot stepout$}{
-    $ffttout \gets (lane \ \&\ stepout)$\;
-    \lIf{$ffttout \neq 0$}{$vecincout \gets vecincout - stepout$}
-    \lElse{$vecincout \gets vecincout + stepout$}
-    $vecpermute \gets vecincout + lane$\;
-    $b \gets \textsc{ShflSync}(fullMask, a, vecpermute)$\;
-    \lIf{$ffttout \neq 0$}{$a \gets \max(a,b)$}
-    \lElse{$a \gets \min(a,b)$}
-
-    \For(\tcp*[f]{merge steps}){$step \gets \lfloor stepout/2 \rfloor$ \KwDownTo $1$ \KwStep $step \gets \lfloor step/2 \rfloor$}{
-        $fftt \gets (lane \ \&\ step)$\;
-        \lIf{$fftt \neq 0$}{$vecincout2 \gets -step$}
-        \lElse{$vecincout2 \gets \ \ step$}
-        $vecpermute \gets vecincout2 + lane$\;
-        $b \gets \textsc{ShflSync}(fullMask, a, vecpermute)$\;
-        \lIf{$fftt \neq 0$}{$a \gets \max(a,b)$}
-        \lElse{$a \gets \min(a,b)$}
-    }
+\KwIn{Shared arrays $S,D$ of length $N=2^m\geq32$; $B\leq N$ threads, $32\mid B$}
+\KwOut{Pointer $S$ to the sorted working array}
+\ForEach{aligned 32-element group assigned to this warp}{
+ Load one value per lane into registers\;
+ Sort the group using reflected and halving-distance shuffle layers\;
+ Store the sorted group in $S$\;
 }
-$dataToSort[lane] \gets a$\;
-
-\caption{Warp-level sorting of 32 values using shuffle-based compare-exchange (bitonic-like).}
-\label{alg:warp_bitonic}
+Block barrier\;
+\For{$s\gets32$; $s<N$; $s\gets2s$}{
+ \For{$i\gets t$; $i<N$; $i\gets i+B$}{
+  $r\gets i\bmod(2s)$; $p\gets i+2(s-r)-1$\;
+  $D[i]\gets\min(S[i],S[p])$ if $r<s$, else $\max(S[i],S[p])$\;
+ }
+ Exchange $S,D$; block barrier\;
+ \For{$d\gets s/2$; $d\geq32$; $d\gets d/2$}{
+  \For{$i\gets t$; $i<N$; $i\gets i+B$}{
+   $p\gets i\xor d$\;
+   $D[i]\gets\min(S[i],S[p])$ if $(i\band d)=0$, else $\max(S[i],S[p])$\;
+  }
+  Exchange $S,D$; block barrier\;
+ }
+ \ForEach{aligned 32-element group assigned to this warp}{
+  Load one value per lane from $S$\;
+  Apply shuffle merge layers at distances $16,8,4,2,1$\;
+  Store the resulting group in $S$\;
+ }
+ Block barrier\;
+}
+\Return{$S$}\;
+\caption{Multiple-elements-per-thread block sort with double-buffered cross-warp layers and warp-local register exchanges. Initialization and final global-memory stores are handled by the caller.}
+\label{alg:block}
 \end{algorithm}
 
+Direct indexing gives a stateless address calculation for each visited output. Double buffering, in turn, lets a thread commit those outputs as it traverses its indices, without retaining every intermediate value until a read-completion barrier. This is the main connection between the two implementation choices. A register-staged alternative could retain several outputs per thread, so double buffering is a design choice, not a general necessity for sorting more elements than threads.
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%
-\subsubsection{Sorting medium arrays (>32 and <=1024 elements)}
+\subsection*{Storage, synchronization, and implementation boundaries}
+For an element occupying $b$ bytes, the principal shared-memory array storage is $Nb$ for the single-array block variant and $2Nb$ for the double-buffered variants. This excludes small control variables and any allocation-alignment overhead. The maximum working length of a two-array kernel must satisfy $2Nb\leq S_{\mathrm{block}}$, where $S_{\mathrm{block}}$ is the permitted per-block allocation. Since $N$ is a power of two, padding can nearly double the working length relative to $n$ as well.
 
-The constraint in terms of size is that the array to sort must fit in shared memory, and that we should have enougth threads to load all the values in parallel.
+Using more shared memory can reduce the number of resident blocks. Shared memory alone bounds that number by $\lfloor S_{\mathrm{SM}}/(2Nb)\rfloor$ for a two-array kernel, where $S_{\mathrm{SM}}$ is the shared memory available per multiprocessor. Registers, threads, and architectural block limits impose additional bounds. Occupying a large fraction of the shared memory does not universally imply that exactly one block is resident; this depends on the device and launch configuration~\citep{nvidiaCudaGuide}.
 
-The kernel is implemented as follows:
-\begin{itemize}
-    \item Each thread loads one element from global memory to shared memory, or pads the array with +infinity if the array size is not a multiple of two;
-    \item Each warp sorts its portion of the array using the warp-level bitonic sort described in the previous section;
-    \item All the threads synchronize using \texttt{\_\_syncthreads()};
-    \item We perform the bitonic merge steps across warps, using shared memory to exchange values between warps, and finish with a step at warp-level;
-    \item Each thread writes back its sorted element from shared memory to global memory.
-\end{itemize}
+If $N=2^m\geq32$, the number of layers that communicate across warps is
+\begin{equation}
+ C(N)=\sum_{k=5}^{m-1}(k-4)=\frac{(m-5)(m-4)}{2}.
+\end{equation}
+For the schedules described above, these layers account for $2C(N)$ block barriers in the single-array output-per-thread kernel and $C(N)$ in the double-buffered kernel. Initialization, warp-to-block handoffs, final stores, and optional sortedness checks add barriers outside this count. Consequently it describes the affected layers, not a universal halving of the whole kernel's synchronization overhead or execution time.
 
-In this approach we need to use synchronization just before the threads write into the shared memory, to ensure all threads have read their values, and just after the write into shared memory, to ensure all threads have written their values before reading for the next step.
-We can remove a synchronization point, if we use a buffer in shared memory, such that each step writes into a different location than the one it reads from.
-The original array and the buffer are swapped at each step.
+\begin{table}[tb]
+\centering
+\small
+\begin{tabular}{p{0.25\linewidth}p{0.20\linewidth}p{0.15\linewidth}p{0.24\linewidth}}
+\toprule
+Kernel family & Logical ownership & Shared arrays & Cross-warp layer barriers\\
+\midrule
+Warp routine & One value per lane & 32 staging values & No cross-warp layers\\
+Block, single array & One value per thread & $N$ values & Two per layer\\
+Block, \texttt{v2} & One value per thread & $2N$ values & One per layer\\
+Block, \texttt{v3} & Several values per thread & $2N$ values & One per layer\\
+\bottomrule
+\end{tabular}
+\caption{Implementation structure. Array storage excludes control variables. Barrier counts refer to the output-per-thread shared-memory layers, excluding handoffs and optional checks. The warp row includes the staging array used by the supplied wrapper, even when exchanges occur in registers.}
+\label{tab:variants}
+\end{table}
 
-\begin{algorithm}[H]
-\DontPrintSemicolon
-\SetKwInOut{Input}{Input}
-\SetKwInOut{Output}{Output}
+The code exposes \texttt{TestIfSorted}, \texttt{FullSM}, and asynchronous-copy variants. Sortedness tests can stop at a stage boundary after verifying the complete valid range; their reductions and barriers are additional work. The network derivation and counts above assume these tests are disabled. The \texttt{FullSM} path supports types exchanged through shared memory, whereas the register path requires supported shuffle operands. The asynchronous wrappers change the loading mechanism rather than the sorting network. We make no claim about overlap or the relative efficiency of these options.
 
-\Input{$dataToSort[0 \dots nbValuesToSort-1]$ in shared memory, $\texttt{threadIdx.x}$, initial $\texttt{vecincout}$}
-\Output{$dataToSort$ updated in-place (compare-exchange network stage)}
+Padding needs particular care. The supplied \texttt{my\_numeric\_limits\_max} helper uses hard-coded finite floating-point values, rather than positive infinity. Thus, the implementation as supplied does not establish padding correctness for all floating-point inputs: values larger than the sentinel and NaNs require separate handling. For key--payload records, a padding record equal in key to a valid record can also enter the retained prefix because the sort is unstable. A restricted key range or a validity field ordered after all real records is needed for that case. These conditions delimit the correctness argument; arbitrary floating-point and record domains are not assumed to be supported without qualification.
 
-\tcp{Omitted: sorting within warps using warp-level bitonic sort}
+\section*{Results}
+\label{sec:results}
+% Performance evaluation deliberately deferred at the author's request.
+Performance results are reserved for a subsequent revision. The layer counts, index identities, and storage requirements above are analytical properties of the described implementation; they do not establish a throughput advantage over other GPU sorting methods.
 
-\For{$stepout \gets 32$ \KwTo $nbValuesToSort - 1$ \KwStep $stepout \gets 2 \cdot stepout$}{
-    $ffttout \gets (\texttt{threadIdx.x} \;\&\; stepout)$\;
-    $\texttt{vecincout} \gets \texttt{vecincout} + (ffttout \neq 0 \;?\; -stepout \;:\; stepout)$\;
-    $vecpermute \gets \texttt{threadIdx.x} + \texttt{vecincout}$\;
-    $a \gets dataToSort[\texttt{threadIdx.x}]$\;
-    $b \gets dataToSort[vecpermute]$\;
-    $best \gets (ffttout \neq 0 \;?\; \max(a,b) \;:\; \min(a,b))$\;
+\section*{Discussion}
+\label{sec:discussion}
+The direct formula separates logical network position from physical thread ownership. It gives a compact description of the partner relation across the one-element and multiple-element mappings, and makes the latter mapping independent of a per-element offset recurrence. Its value here is implementation clarity and flexible traversal. Direct indexing is already used in GPU sorting, and the formulas do not reduce the number of network layers.
 
-    \tcp{CUDA barrier: \_\_syncthreads()}
-    \textbf{sync}\;
+Double buffering addresses a different dependency: preserving old shared-memory values while threads generate the next layer. In the supplied output-per-thread design, separate arrays permit writes before every source read has completed. The retained publication barrier is essential. A comparison against a comparator-per-thread in-place baseline must account for that baseline's different ownership scheme, rather than attributing two barriers to every possible in-place implementation.
 
-    $dataToSort[\texttt{threadIdx.x}] \gets best$\;
+These choices are most relevant when the input fits on chip but does not naturally map to one element per thread. They also impose limits: two arrays reduce capacity and potentially occupancy, large record types increase the storage cost, and the network retains $O(N\log^2N)$ work. Warp shuffles reduce shared-memory communication only for compatible operand types and valid participating-lane configurations. The relative importance of these effects remains an empirical question.
 
-    \tcp{CUDA barrier: \_\_syncthreads()}
-    \textbf{sync}\;
+Before submission, evaluation should distinguish direct indexing from buffering and thread ownership, include an in-place comparator-per-thread network and appropriate CUB local primitives, and verify ordering and permutation preservation separately. Correctness checks should cover padding, duplicate keys, payload identity, and all supported synchronization paths. Such validation is distinct from performance benchmarking and is not inferred from the analytical argument alone.
 
-    \For{$step \gets stepout/2$ \KwDownTo $32$ \KwStep $step \gets step/2$}{
-        $vecinc \gets step$\;
-        $fftt \gets (\texttt{threadIdx.x} \;\&\; step)$\;
-        $vecincout2 \gets (fftt \neq 0 \;?\; -vecinc \;:\; vecinc)$\;
-        $vecpermute \gets \texttt{threadIdx.x} + vecincout2$\;
-        $a \gets dataToSort[\texttt{threadIdx.x}]$\;
-        $b \gets dataToSort[vecpermute]$\;
-        $best \gets (fftt \neq 0 \;?\; \max(a,b) \;:\; \min(a,b))$\;
-
-        \tcp{CUDA barrier: \_\_syncthreads()}
-        \textbf{sync}\;
-
-        $dataToSort[\texttt{threadIdx.x}] \gets best$\;
-
-        \tcp{CUDA barrier: \_\_syncthreads()}
-        \textbf{sync}\;
-    }
-
-    \tcp{Omitted: sorting within warps using warp-level bitonic sort}
-}
-\caption{CUDA-style compare--exchange stages (shared-memory bitonic-like network)}
-\end{algorithm}
-
-
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%
-\subsubsection{Sorting large arrays (>1024 elements)}
-
-When the array and the buffer are the largest that can fit in shared memory, there are more elements than the number of threads a block can have.
-Consequently, each thread must handle multiple elements, and thus it is impossible to compute the index of the element to read or write iteratively as in the previous algorithms.
-Instead, each thread computes the indices of all the elements it must handle at each step.
-To do so, we use bitwise address arithmetic to compute the indices of the elements to compare and exchange.
-It is clear that with this approach we need a buffer because the threads cannot store all their values in registers.
-While this kernel can sort larger arrays, this will also occupy all the shared memory of the block, preventing other blocks from being launched on the same SM.
-Therefore, it is recommended to carefuly dynamically allocate shared memory based on the needed size, and not the maximum possible size.
-
-\begin{algorithm}[H]
-\DontPrintSemicolon
-\SetKwProg{Fn}{Function}{:}{}
-\SetKwFor{For}{for}{do}{endfor}
-\SetKwFor{ForPar}{for each}{do}{endfor}
-\SetKw{Swap}{swap}
-\SetKw{Sync}{\_\_syncthreads}
-\SetKwFunction{Min}{min}
-\SetKwFunction{Max}{max}
-
-\Fn{\textsc{KernelStep}$(\texttt{dataToSort}, \texttt{buffer}, \texttt{nbWorkingValues})$}{
-    \For{$\texttt{stepout} \leftarrow 32$ \KwTo $\texttt{nbWorkingValues}-1$ \KwStep $\texttt{stepout} \leftarrow 2\cdot \texttt{stepout}$}{
-        
-        \ForPar{$\texttt{idxVal} \leftarrow \texttt{threadIdx.x}$ \KwTo $\texttt{nbWorkingValues}-1$ \KwStep $\texttt{idxVal} \leftarrow \texttt{idxVal} + \texttt{blockDim.x}$}{
-            $\texttt{idxInStep} \leftarrow \texttt{idxVal} \bmod (2\cdot \texttt{stepout})$\;
-            $\texttt{vecincout} \leftarrow 2\cdot(\texttt{stepout} - \texttt{idxInStep}) - 1$\;
-            $\texttt{vecpermute} \leftarrow \texttt{idxVal} + \texttt{vecincout}$\;
-            $a \leftarrow \texttt{dataToSort[idxVal]}$\;
-            $b \leftarrow \texttt{dataToSort[vecpermute]}$\;
-            $\texttt{best} \leftarrow 
-                \begin{cases}
-                    \Max(a,b) & \text{if } \texttt{idxInStep} \ge \texttt{stepout}\\
-                    \Min(a,b) & \text{otherwise}
-                \end{cases}$\;
-            $\texttt{buffer[idxVal]} \leftarrow \texttt{best}$\;
-        }
-        \Swap{$\texttt{dataToSort}, \texttt{buffer}$}\;
-        \Sync{}\;
-
-        \For{$\texttt{step} \leftarrow \texttt{stepout}/2$ \KwTo $32$ \KwStep $\texttt{step} \leftarrow \texttt{step}/2$}{
-            \ForPar{$\texttt{idxVal} \leftarrow \texttt{threadIdx.x}$ \KwTo $\texttt{nbWorkingValues}-1$ \KwStep $\texttt{idxVal} \leftarrow \texttt{idxVal} + \texttt{blockDim.x}$}{
-                $\texttt{vecinc} \leftarrow \texttt{step}$\;
-                $\texttt{fftt} \leftarrow (\texttt{idxVal} \ \&\  \texttt{step})$\;
-                $\texttt{vecincout2} \leftarrow 
-                    \begin{cases}
-                        -\texttt{vecinc} & \text{if } \texttt{fftt} \neq 0\\
-                        \phantom{-}\texttt{vecinc} & \text{otherwise}
-                    \end{cases}$\;
-                $\texttt{vecpermute} \leftarrow \texttt{idxVal} + \texttt{vecincout2}$\;
-                $a \leftarrow \texttt{dataToSort[idxVal]}$\;
-                $b \leftarrow \texttt{dataToSort[vecpermute]}$\;
-                $\texttt{best} \leftarrow 
-                    \begin{cases}
-                        \Max(a,b) & \text{if } \texttt{fftt} \neq 0\\
-                        \Min(a,b) & \text{otherwise}
-                    \end{cases}$\;
-                $\texttt{buffer[idxVal]} \leftarrow \texttt{best}$\;
-            }
-            \Swap{$\texttt{dataToSort}, \texttt{buffer}$}\;
-            \Sync{}\;
-        }
-    }
-}
-\caption{Bitonic-like compare-exchange stages (CUDA-style, per-block)}
-\end{algorithm}
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\section{Experiments}
-\label{sec:experiments}
-
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%
-\subsection{Experimental Setup}
-
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%
-\subsection{Results}
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\section{Conclusion}
+\section*{Conclusions}
 \label{sec:conclusion}
+We have described a CUDA implementation of small-array bitonic sorting centered on direct partner indexing and double-buffered shared-memory layers. A reflected index replaces the accumulated outer-stage offset, while exclusive-or partners express the remaining merge layers. This formulation supports a strided mapping with several elements per thread. Alternating shared-memory arrays removes the read-before-overwrite barrier of the supplied in-place output-per-thread schedule, retaining the barrier needed before dependent reads. The cost is a second working array and the resulting capacity and occupancy trade-off. The paper's contribution is this implementation, its derivation, and the explicit account of its correctness conditions and resource requirements.
 
-
+% TODO(author): complete submission declarations, affiliation, correspondence,
+% funding/competing-interest statements, and a public archived code release.
+% No repository URL, license, or funding information has been inferred.
+\bibliography{main}
 \end{document}
