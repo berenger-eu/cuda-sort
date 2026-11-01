@@ -96,3 +96,48 @@ any internal allocations and worker-stream completion. `E_s/A` is an amortized
 throughput measure, not the latency of one isolated sort. `X_s` uses N log N as
 requested; a bitonic network itself performs O(N log-squared N) work. Check that
 the batch is large enough to saturate the GPU before interpreting differences.
+
+
+## Experimental kernels: v4 and v5
+
+The reference `cusort.hpp` kernels are unchanged. New kernels live in
+`cusort_experiments.hpp` and are included by `bench.cu`:
+
+- `bitonic_v4_xor`: a v3 descendant using 32-bit unsigned indices,
+  `i ^ (2*stage-1)` reflection partners and `i ^ distance` merge partners.
+  The fixed 32-lane warp networks are explicitly unrolled. Runtime-size block
+  layers retain their loops; there is no register-tiled redesign in this variant.
+- `bitonic_v5_static`: the same operations with template working length and
+  block size, compile-time stage/distance expansion, and constant per-thread
+  traversal counts. Per-thread loop expansion is capped at eight iterations
+  (larger counts are partially unrolled) to limit generated code size.
+
+Both preserve the two shared arrays, cross-warp barrier schedule, comparison
+semantics, padding, sortedness checkpoints, and the existing benchmark's full
+batch validation. Both test all sortedness/shared-warp/copy flag combinations.
+v4 sweeps every warp multiple like v3. v5 specializes power-of-two working
+lengths and block sizes from 32 through the supported limit (up to 1024 threads),
+so the item count per thread is exact. Compare v3/v4/v5 at matching block sizes
+for a controlled comparison; their overall best envelopes tune independently.
+They are additional benchmark methods, not replacements in the public Sort,
+SortMerge, or HybridSort dispatch.
+
+The CSV also records `registers_per_thread`, `active_blocks_per_sm`, and
+`local_bytes_per_thread` for v1/v2/v3/v4/v5 and CUB. Occupancy is the runtime API's
+resource prediction; local allocation is not itself a measurement of actual
+spill traffic. Unknown/library-managed values use -1. The new columns are
+compatible with the plotting script, and do not change E or X.
+
+To validate or benchmark only selected methods, without repeating Thrust calls:
+
+```sh
+./bench --check-only --max-size 129 --max-threads 128 --methods bitonic_v3,bitonic_v4_xor,bitonic_v5_static,cub_block_merge
+./bench --type int --min-size 32 --methods bitonic_v3,bitonic_v4_xor,bitonic_v5_static,cub_block_merge --output comparison_int
+```
+
+Without `--methods`, all methods (including references and Thrust) are retained.
+Static specialization increases build time and binary size. A GPU run is still
+needed to determine whether any experiment improves performance; no speedup is
+assumed from the source transformation alone. The companion plotting script in
+the paper folder recognizes both new method names and includes their individual
+configuration plots and thread heatmaps when their measurements are present.

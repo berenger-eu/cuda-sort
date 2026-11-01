@@ -1,4 +1,5 @@
 #include "cusort.hpp"
+#include "cusort_experiments.hpp"
 #include "intanddata.hpp"
 #include <cub/block/block_load.cuh>
 #include <cub/block/block_store.cuh>
@@ -15,6 +16,7 @@
 #include <iomanip>
 #include <numeric>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -31,6 +33,8 @@ struct BenchOptions {
     int batchElements = 1 << 22;
     int repetitions = 5;
     bool checkOnly = false;
+    std::set<std::string> methods; // Empty means all reference and experimental methods.
+    bool enabled(const char* method) const { return methods.empty() || methods.count(method) != 0; }
 };
 
 std::string timestamp() {
@@ -49,6 +53,8 @@ void usage() {
         "  --batch-elements M Bound N*A per batch (default 4194304)\n"
         "  --repetitions R    Timed repetitions after warm-up (default 5)\n"
         "  --output PREFIX   CSV path prefix\n"
+        "  --methods LIST    Comma-separated CSV method names (default: all)\n"
+        "                    New: bitonic_v4_xor, bitonic_v5_static\n"
         "  --check-only      Validate every applicable configuration, with 3 arrays\n"
         "                    and no timing; includes duplicate/extreme keys.\n"
         "Small CSV: E_s is CUDA-event batch time, X_s=E_s/(A*N*log2(N)).\n"
@@ -68,6 +74,15 @@ BenchOptions parseOptions(int argc, char** argv) {
         if (key == "--mode") o.mode = value;
         else if (key == "--type") o.type = value;
         else if (key == "--output") o.prefix = value;
+        else if (key == "--methods") {
+            std::istringstream names(value);
+            std::string method;
+            while (std::getline(names, method, ',')) {
+                if (method.empty()) throw std::runtime_error("Empty name in --methods");
+                o.methods.insert(method);
+            }
+            if (o.methods.empty() || value.back() == ',') throw std::runtime_error("Empty name in --methods");
+        }
         else {
             size_t consumed = 0;
             const long long number = std::stoll(value, &consumed);
@@ -91,6 +106,11 @@ BenchOptions parseOptions(int argc, char** argv) {
         throw std::runtime_error("--max-threads must be a multiple of 32 in [32,1024]");
     if (o.maxSize && o.minSize > o.maxSize)
         throw std::runtime_error("--min-size exceeds --max-size");
+    const std::set<std::string> knownMethods = {
+        "bitonic_warp", "bitonic_v1", "bitonic_v2", "bitonic_v3", "bitonic_v4_xor", "bitonic_v5_static",
+        "cub_block_merge", "thrust_segment_loop", "large_partition", "large_merge", "large_hybrid"};
+    for (const auto& method : o.methods)
+        if (!knownMethods.count(method)) throw std::runtime_error("Unknown --methods entry: " + method);
     if (o.checkOnly) { o.arrays = std::min(o.arrays, 3); o.repetitions = 0; }
     return o;
 }
@@ -183,6 +203,9 @@ struct Configuration {
     int testSorted = -1, fullSM = -1, asyncCopy = -1;
     int threads = 0, itemsPerThread = 0, working = 0;
     size_t sharedBytes = 0;
+    int registersPerThread = -1;
+    int activeBlocksPerSM = -1;
+    long long localBytesPerThread = -1;
 };
 
 struct Csv {
@@ -196,7 +219,8 @@ struct Csv {
         CUDA_CHECK(cudaRuntimeGetVersion(&runtimeVersion));
         stream << "method,distribution,N,arrays,total_values,working_values,threads,items_per_thread,"
                   "testsorted,fullsm,asynccpy,shared_bytes,trial,E_s,X_s,E_wall_s,"
-                  "wall_X_s,time_per_array_s,time_per_value_s,validated,cuda_runtime,thrust_version,cub_version\n";
+                  "wall_X_s,time_per_array_s,time_per_value_s,validated,cuda_runtime,thrust_version,cub_version,"
+                  "registers_per_thread,active_blocks_per_sm,local_bytes_per_thread\n";
         stream << std::setprecision(17);
     }
     void write(const Configuration& c, int distribution, int n, int arrays, int trial,
@@ -211,7 +235,8 @@ struct Csv {
             << elapsed << ',' << (denom ? elapsed / denom : nan) << ',' << wall << ','
             << (denom ? wall / denom : nan) << ',' << elapsed / arrays << ','
             << elapsed / values << ",1," << runtimeVersion << ',' << THRUST_VERSION
-            << ',' << CUB_VERSION << '\n';
+            << ',' << CUB_VERSION << ',' << c.registersPerThread << ',' << c.activeBlocksPerSM
+            << ',' << c.localBytesPerThread << '\n';
         stream.flush();
     }
 };
@@ -252,6 +277,7 @@ template <typename T> struct Batch {
             + " async=" + std::to_string(config.asyncCopy) + " distribution=" + distributionName(distribution));
     }
     template <typename Launch> void run(const Configuration& config, Launch launch) {
+        if (!options.enabled(config.method)) return;
         // Warm-up and complete correctness check are both outside timed samples.
         restore();
         launch();
@@ -306,6 +332,19 @@ __global__ void benchmarkSortBlock(T* data, int n, int working) {
     }
 }
 
+// Packed batches use exactly the same input/output layout as the references.
+template <typename T, bool Sorted, bool Shared, bool Async>
+__global__ void benchmarkSortV4Xor(T* data, int n, unsigned working) {
+    T* segment = data + size_t(blockIdx.x) * n;
+    cusort_experiment::Sort<T, Sorted, Shared, Async>(segment, segment, n, working);
+}
+
+template <typename T, unsigned Working, unsigned Threads, bool Sorted, bool Shared, bool Async>
+__global__ void benchmarkSortV5Static(T* data, int n) {
+    T* segment = data + size_t(blockIdx.x) * n;
+    cusort_experiment::Sort<T, Sorted, Shared, Async, Working, Threads>(segment, segment, n, Working);
+}
+
 // CUB padding must be strictly after valid records, even for INT_MAX keys.
 // Generated payloads are [0,count); INT_MAX is reserved for the padding record.
 template <typename T> struct CubLess {
@@ -337,7 +376,8 @@ __global__ void benchmarkBlockMergeSort(T* data, int n) {
 }
 
 template <typename Kernel> bool supportedKernel(Kernel kernel, int threads, size_t dynamicBytes,
-                                                const cudaDeviceProp& device, size_t* totalShared = nullptr) {
+                                                const cudaDeviceProp& device, size_t* totalShared = nullptr,
+                                                cudaFuncAttributes* attributes = nullptr, int* active = nullptr) {
     cudaFuncAttributes attr;
     CUDA_CHECK(cudaFuncGetAttributes(&attr, kernel));
     if (totalShared) *totalShared = attr.sharedSizeBytes + dynamicBytes;
@@ -347,6 +387,8 @@ template <typename Kernel> bool supportedKernel(Kernel kernel, int threads, size
     // unlaunchable. In particular, test this for the 1024-thread CUB variants.
     int activeBlocks = 0;
     CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&activeBlocks, kernel, threads, dynamicBytes));
+    if (attributes) *attributes = attr;
+    if (active) *active = activeBlocks;
     return activeBlocks > 0;
 }
 
@@ -355,10 +397,54 @@ void runBitonicBlock(Batch<T>& batch, int threads, int working, const cudaDevice
     const size_t bytes = size_t(working) * sizeof(T) * (Variant == 1 ? 1 : 2);
     auto kernel = benchmarkSortBlock<T, Variant, Sorted, Shared, Async>;
     size_t shared = 0;
-    if (!supportedKernel(kernel, threads, bytes, device, &shared)) return;
+    cudaFuncAttributes attr;
+    int active = 0;
+    if (!supportedKernel(kernel, threads, bytes, device, &shared, &attr, &active)) return;
     const char* name = Variant == 1 ? "bitonic_v1" : (Variant == 2 ? "bitonic_v2" : "bitonic_v3");
-    Configuration c{name, Sorted, Shared, Async, threads, (working + threads - 1) / threads, working, shared};
+    Configuration c{name, Sorted, Shared, Async, threads, (working + threads - 1) / threads, working, shared,
+                    attr.numRegs, active, static_cast<long long>(attr.localSizeBytes)};
     batch.run(c, [&] { kernel<<<batch.arrays, threads, bytes>>>(batch.values.ptr, batch.n, working); });
+}
+
+template <typename T, bool Sorted, bool Shared, bool Async>
+void runV4(Batch<T>& batch, int threads, int working, const cudaDeviceProp& device) {
+    if (!batch.options.enabled("bitonic_v4_xor")) return;
+    auto kernel = benchmarkSortV4Xor<T, Sorted, Shared, Async>;
+    const size_t bytes = 2 * size_t(working) * sizeof(T);
+    size_t shared = 0;
+    cudaFuncAttributes attr;
+    int active = 0;
+    if (!supportedKernel(kernel, threads, bytes, device, &shared, &attr, &active)) return;
+    Configuration c{"bitonic_v4_xor", Sorted, Shared, Async, threads,
+                    (working + threads - 1) / threads, working, shared,
+                    attr.numRegs, active, static_cast<long long>(attr.localSizeBytes)};
+    batch.run(c, [&] { kernel<<<batch.arrays, threads, bytes>>>(batch.values.ptr, batch.n, working); });
+}
+
+template <typename T, bool Sorted, bool Shared, bool Async>
+void runV5(Batch<T>& batch, int working, int maxThreads, const cudaDeviceProp& device) {
+    if (!batch.options.enabled("bitonic_v5_static")) return;
+    // Powers of two give an exact compile-time items-per-thread count. v3/v4
+    // retain the full warp-multiple sweep, including 96,160,... threads.
+    for_int_pow2<32, ComputeDefaultMaxBitoSort<T>() + 1>([&](auto sizeConstant) {
+        constexpr unsigned Working = decltype(sizeConstant)::value;
+        if (Working != unsigned(working)) return;
+        for_int_pow2<32, 1025>([&](auto threadsConstant) {
+            constexpr unsigned Threads = decltype(threadsConstant)::value;
+            if constexpr (Threads <= Working) {
+                if (Threads > unsigned(maxThreads)) return;
+                auto kernel = benchmarkSortV5Static<T, Working, Threads, Sorted, Shared, Async>;
+                const size_t bytes = 2 * size_t(Working) * sizeof(T);
+                size_t shared = 0;
+                cudaFuncAttributes attr;
+                int active = 0;
+                if (!supportedKernel(kernel, Threads, bytes, device, &shared, &attr, &active)) return;
+                Configuration c{"bitonic_v5_static", Sorted, Shared, Async, int(Threads), int(Working / Threads),
+                                int(Working), shared, attr.numRegs, active, static_cast<long long>(attr.localSizeBytes)};
+                batch.run(c, [&] { kernel<<<batch.arrays, Threads, bytes>>>(batch.values.ptr, batch.n); });
+            }
+        });
+    });
 }
 
 template <typename T> void runSmallBitonic(Batch<T>& batch, const cudaDeviceProp& device) {
@@ -381,8 +467,11 @@ template <typename T> void runSmallBitonic(Batch<T>& batch, const cudaDeviceProp
                     runBitonicBlock<T, 1, Sorted, Shared, Async>(batch, working, working, device);
                     runBitonicBlock<T, 2, Sorted, Shared, Async>(batch, working, working, device);
                 }
-                for (int threads = 32; threads <= std::min(working, maxThreads); threads += 32)
+                for (int threads = 32; threads <= std::min(working, maxThreads); threads += 32) {
                     runBitonicBlock<T, 3, Sorted, Shared, Async>(batch, threads, working, device);
+                    runV4<T, Sorted, Shared, Async>(batch, threads, working, device);
+                }
+                runV5<T, Sorted, Shared, Async>(batch, working, maxThreads, device);
             });
         });
     });
@@ -399,8 +488,11 @@ template <typename T> void runSmallCub(Batch<T>& batch, const cudaDeviceProp& de
             if (Threads * Items != working) return;
             auto kernel = benchmarkBlockMergeSort<T, Threads, Items>;
             size_t shared = 0;
-            if (!supportedKernel(kernel, Threads, 0, device, &shared)) return;
-            Configuration c{"cub_block_merge", -1, -1, -1, Threads, Items, working, shared};
+            cudaFuncAttributes attr;
+            int active = 0;
+            if (!supportedKernel(kernel, Threads, 0, device, &shared, &attr, &active)) return;
+            Configuration c{"cub_block_merge", -1, -1, -1, Threads, Items, working, shared,
+                            attr.numRegs, active, static_cast<long long>(attr.localSizeBytes)};
             batch.run(c, [&] { kernel<<<batch.arrays, Threads>>>(batch.values.ptr, batch.n); });
         });
     });
