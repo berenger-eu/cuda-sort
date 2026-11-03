@@ -64,7 +64,19 @@ the resulting count still applies to every method.
 Initialization, allocations, CPU-reference construction, warm-up, validation,
 and restoration of the input batch are outside timed regions. Each timed
 repetition starts from the same unsorted input, including when testing early
-exit. The original six distributions are reproducible across methods.
+exit. All nine distributions are reproducible across methods. In addition to SORTED,
+REVERSED, RANDOM, NORMAL, CONSTANT and BINARY, every run includes
+`ALMOST_SORTED_1`, `ALMOST_SORTED_5` and `ALMOST_SORTED_25`, for both element types
+and both benchmark modes. These start with unique sorted keys `[0,N)`. For a
+percentage p, select `m = min(N, max(2, floor((N*p + 50)/100)))` distinct random
+positions and cyclically permute their keys. Exactly m keys move, preserving
+the key multiset; this is a fraction of displaced positions, not a fraction of
+inversions. For N=1 no position moves. Integer rounding and the two-position
+minimum mean the effective fraction differs from the label for small N.
+A fixed seed per array provides reproducible, independently selected positions;
+all methods and configurations receive the same input. Record payloads remain
+unique input-position identifiers. Generation and transfer occur outside timing.
+The legacy `test`/`tune` distributions and sorting kernels are unchanged.
 
 Every configuration is checked after its warm-up and every timed repetition
 against a CPU reference for

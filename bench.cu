@@ -1,6 +1,7 @@
 #include "cusort.hpp"
 #include "cusort_experiments.hpp"
 #include "intanddata.hpp"
+#include "bench_distributions.hpp"
 #include <cub/block/block_load.cuh>
 #include <cub/block/block_store.cuh>
 #include <cub/block/block_merge_sort.cuh>
@@ -19,6 +20,23 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+
+// Additional benchmark distributions leave the legacy test/tune enum unchanged.
+enum BenchInitData {
+    ALMOST_SORTED_1 = NB_INITS,
+    ALMOST_SORTED_5,
+    ALMOST_SORTED_25,
+    NB_BENCH_INITS
+};
+
+int almostSortedPercent(int d) {
+    switch (d) {
+        case ALMOST_SORTED_1: return 1;
+        case ALMOST_SORTED_5: return 5;
+        case ALMOST_SORTED_25: return 25;
+        default: return 0;
+    }
+}
 
 // Default execution is restricted to independent, on-chip bitonic-sized arrays.
 // --mode large explicitly selects the older whole-range sorting algorithms.
@@ -55,6 +73,7 @@ void usage() {
         "  --output PREFIX   CSV path prefix\n"
         "  --methods LIST    Comma-separated CSV method names (default: all)\n"
         "                    New: bitonic_v4_xor, bitonic_v5_static\n"
+        "  Distributions: six original cases + ALMOST_SORTED_1, _5, _25.\n"
         "  --check-only      Validate every applicable configuration, with 3 arrays\n"
         "                    and no timing; includes duplicate/extreme keys.\n"
         "Small CSV: E_s is CUDA-event batch time, X_s=E_s/(A*N*log2(N)).\n"
@@ -144,7 +163,10 @@ __global__ void initializeBatch(T* data, int n, int count, int distribution) {
         const unsigned random = mixBits(unsigned(i) + 1234U);
         int key = 0;
         switch (distribution) {
-            case SORTED: key = local; break;
+            case SORTED:
+            case ALMOST_SORTED_1:
+            case ALMOST_SORTED_5:
+            case ALMOST_SORTED_25: key = local; break;
             case REVERSED: key = n - 1 - local; break;
             case RANDOM: key = int(random % 1000001U); break;
             case NORMAL: {
@@ -169,7 +191,13 @@ __global__ void initializeBatch(T* data, int n, int count, int distribution) {
 }
 
 std::string distributionName(int d) {
-    return d == NB_INITS ? "EXTREMES" : InitDataString(d);
+    switch (d) {
+        case ALMOST_SORTED_1: return "ALMOST_SORTED_1";
+        case ALMOST_SORTED_5: return "ALMOST_SORTED_5";
+        case ALMOST_SORTED_25: return "ALMOST_SORTED_25";
+        case NB_BENCH_INITS: return "EXTREMES";
+        default: return InitDataString(d);
+    }
 }
 
 template <typename T>
@@ -256,6 +284,18 @@ template <typename T> struct Batch {
         CUDA_CHECK(cudaGetLastError());
         std::vector<T> expected(count);
         CUDA_CHECK(cudaMemcpy(expected.data(), input.ptr, size_t(count) * sizeof(T), cudaMemcpyDeviceToHost));
+        // Generate perturbations before timing and before building the reference.
+        // Record payloads retain their unique input indices for validateBatch.
+        if (const int percent = almostSortedPercent(distribution)) {
+            for (int a = 0; a < arrays; ++a) {
+                perturbSortedKeys(n, percent, mixBits(unsigned(a) + 1234U), [&](int position, int key) {
+                    auto& value = expected[size_t(a) * n + position];
+                    if constexpr (std::is_same<T, IntAndData>::value) value.val = key;
+                    else value = key;
+                });
+            }
+            CUDA_CHECK(cudaMemcpy(input.ptr, expected.data(), size_t(count) * sizeof(T), cudaMemcpyHostToDevice));
+        }
         for (int a = 0; a < arrays; ++a)
             std::sort(expected.begin() + size_t(a) * n, expected.begin() + size_t(a + 1) * n);
         CUDA_CHECK(cudaMemcpy(reference.ptr, expected.data(), size_t(count) * sizeof(T), cudaMemcpyHostToDevice));
@@ -553,7 +593,7 @@ template <typename T> void benchmarkSmall(const BenchOptions& options, const cud
     Csv csv(options.prefix + "_" + type + "_small.csv");
     for (int n : smallSizes(options.minSize, maximum)) {
         const int arrays = safeArrays<T>(n, options);
-        for (int distribution = 0; distribution < NB_INITS + (options.checkOnly ? 1 : 0); ++distribution) {
+        for (int distribution = 0; distribution < NB_BENCH_INITS + (options.checkOnly ? 1 : 0); ++distribution) {
             std::cout << "small " << type << " N=" << n << " arrays=" << arrays << ' '
                 << distributionName(distribution) << std::endl;
             Batch<T> batch(n, arrays, distribution, options, csv);
@@ -573,7 +613,7 @@ template <typename T> void benchmarkLarge(const BenchOptions& options, const cud
     const int minimum = std::max(options.minSize, ComputeDefaultMaxBitoSort<T>() + 1);
     Csv csv(options.prefix + "_" + type + "_large.csv");
     for (int n = GreaterPowerOf2EqualOrLarger(minimum); n <= maximum; n *= 2) {
-        for (int distribution = 0; distribution < NB_INITS + (options.checkOnly ? 1 : 0); ++distribution) {
+        for (int distribution = 0; distribution < NB_BENCH_INITS + (options.checkOnly ? 1 : 0); ++distribution) {
             std::cout << "large " << type << " N=" << n << ' ' << distributionName(distribution) << std::endl;
             Batch<T> batch(n, 1, distribution, options, csv);
             for_bool([&](auto sorted) {
