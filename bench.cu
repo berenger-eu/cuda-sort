@@ -23,17 +23,17 @@
 
 // Additional benchmark distributions leave the legacy test/tune enum unchanged.
 enum BenchInitData {
-    ALMOST_SORTED_1 = NB_INITS,
-    ALMOST_SORTED_5,
-    ALMOST_SORTED_25,
+    PERTURBED_2 = NB_INITS,
+    PERTURBED_8,
+    PERTURBED_32,
     NB_BENCH_INITS
 };
 
-int almostSortedPercent(int d) {
+int perturbationAmplitude(int d) {
     switch (d) {
-        case ALMOST_SORTED_1: return 1;
-        case ALMOST_SORTED_5: return 5;
-        case ALMOST_SORTED_25: return 25;
+        case PERTURBED_2: return 2;
+        case PERTURBED_8: return 8;
+        case PERTURBED_32: return 32;
         default: return 0;
     }
 }
@@ -73,7 +73,7 @@ void usage() {
         "  --output PREFIX   CSV path prefix\n"
         "  --methods LIST    Comma-separated CSV method names (default: all)\n"
         "                    New: bitonic_v4_xor, bitonic_v5_static\n"
-        "  Distributions: six original cases + ALMOST_SORTED_1, _5, _25.\n"
+        "  Distributions: six original cases + PERTURBED_2, _8, _32 (bounded value noise).\n"
         "  --check-only      Validate every applicable configuration, with 3 arrays\n"
         "                    and no timing; includes duplicate/extreme keys.\n"
         "Small CSV: E_s is CUDA-event batch time, X_s=E_s/(A*N*log2(N)).\n"
@@ -164,9 +164,9 @@ __global__ void initializeBatch(T* data, int n, int count, int distribution) {
         int key = 0;
         switch (distribution) {
             case SORTED:
-            case ALMOST_SORTED_1:
-            case ALMOST_SORTED_5:
-            case ALMOST_SORTED_25: key = local; break;
+            case PERTURBED_2:
+            case PERTURBED_8:
+            case PERTURBED_32: key = local; break;
             case REVERSED: key = n - 1 - local; break;
             case RANDOM: key = int(random % 1000001U); break;
             case NORMAL: {
@@ -192,9 +192,9 @@ __global__ void initializeBatch(T* data, int n, int count, int distribution) {
 
 std::string distributionName(int d) {
     switch (d) {
-        case ALMOST_SORTED_1: return "ALMOST_SORTED_1";
-        case ALMOST_SORTED_5: return "ALMOST_SORTED_5";
-        case ALMOST_SORTED_25: return "ALMOST_SORTED_25";
+        case PERTURBED_2: return "PERTURBED_2";
+        case PERTURBED_8: return "PERTURBED_8";
+        case PERTURBED_32: return "PERTURBED_32";
         case NB_BENCH_INITS: return "EXTREMES";
         default: return InitDataString(d);
     }
@@ -286,9 +286,9 @@ template <typename T> struct Batch {
         CUDA_CHECK(cudaMemcpy(expected.data(), input.ptr, size_t(count) * sizeof(T), cudaMemcpyDeviceToHost));
         // Generate perturbations before timing and before building the reference.
         // Record payloads retain their unique input indices for validateBatch.
-        if (const int percent = almostSortedPercent(distribution)) {
+        if (const int amplitude = perturbationAmplitude(distribution)) {
             for (int a = 0; a < arrays; ++a) {
-                perturbSortedKeys(n, percent, mixBits(unsigned(a) + 1234U), [&](int position, int key) {
+                generateLocallyPerturbedKeys(n, amplitude, mixBits(unsigned(a) + 1234U), [&](int position, int key) {
                     auto& value = expected[size_t(a) * n + position];
                     if constexpr (std::is_same<T, IntAndData>::value) value.val = key;
                     else value = key;

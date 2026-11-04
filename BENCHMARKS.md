@@ -63,20 +63,46 @@ the resulting count still applies to every method.
 
 Initialization, allocations, CPU-reference construction, warm-up, validation,
 and restoration of the input batch are outside timed regions. Each timed
-repetition starts from the same unsorted input, including when testing early
-exit. All nine distributions are reproducible across methods. In addition to SORTED,
-REVERSED, RANDOM, NORMAL, CONSTANT and BINARY, every run includes
-`ALMOST_SORTED_1`, `ALMOST_SORTED_5` and `ALMOST_SORTED_25`, for both element types
-and both benchmark modes. These start with unique sorted keys `[0,N)`. For a
-percentage p, select `m = min(N, max(2, floor((N*p + 50)/100)))` distinct random
-positions and cyclically permute their keys. Exactly m keys move, preserving
-the key multiset; this is a fraction of displaced positions, not a fraction of
-inversions. For N=1 no position moves. Integer rounding and the two-position
-minimum mean the effective fraction differs from the label for small N.
-A fixed seed per array provides reproducible, independently selected positions;
-all methods and configurations receive the same input. Record payloads remain
-unique input-position identifiers. Generation and transfer occur outside timing.
-The legacy `test`/`tune` distributions and sorting kernels are unchanged.
+repetition starts from the same input, including when testing early exit.
+All nine distributions are reproducible across methods. In addition to SORTED,
+REVERSED, RANDOM, NORMAL, CONSTANT and BINARY, every run now includes
+`PERTURBED_2`, `PERTURBED_8` and `PERTURBED_32`, for both element types and
+both benchmark modes. These replace the previous `ALMOST_SORTED_*` cases;
+the old measurements are not renamed or reinterpreted.
+
+For each independent array, start from regularly spaced sorted keys
+`x[i] = s*i`, with `s = 4`, and generate one perturbed state:
+
+```
+x_new[i] = 4*i + epsilon[i]
+epsilon[i] ~ discrete uniform {-4*r, ..., +4*r}
+r = 2, 8, or 32
+```
+
+The suffix r is an amplitude in initial key spacings, not a percentage or an
+exact displacement. Noise is sampled for every key; zero noise and ties are
+allowed. Keys can be negative and are not clamped at the endpoints. The key
+multiset changes. With stable tie-breaking by input position, each element's
+rank displacement is at most `2*r` (respectively 4, 16, 64 positions): keys
+initially separated by more than `2*r` positions cannot exchange order.
+Even a very short movement can cross a warp or block boundary; the generator
+has no aligned windows. For short arrays the bound is also limited by N-1.
+The construction does not force an unsorted result and does not guarantee
+that the sorting network's early-exit checks will succeed early.
+
+A fixed seed `mixBits(array_index + 1234)` gives the same inputs to all methods
+and configurations and provides different noise sequences across batch arrays.
+Record payloads remain unique input-position identifiers. Host generation and
+transfer occur outside timing; validation checks the perturbed keys, not the
+unperturbed baseline. The supported maximum N (2^28), spacing and amplitudes
+keep all generated keys within signed 32-bit range.
+
+This is a simplified one-step model of temporal coherence, motivated by moving
+object bounds in sweep-and-prune collision detection or particle depths in
+transparent rendering. It is not an application trace or an end-to-end
+simulation benchmark. Its performance must be measured before making any
+claim of a benefit. The legacy `test`/`tune` distributions and sorting kernels
+are unchanged.
 
 Every configuration is checked after its warm-up and every timed repetition
 against a CPU reference for
