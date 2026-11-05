@@ -179,3 +179,47 @@ needed to determine whether any experiment improves performance; no speedup is
 assumed from the source transformation alone. The companion plotting script in
 the paper folder recognizes both new method names and includes their individual
 configuration plots and thread heatmaps when their measurements are present.
+
+## v6: persistent register tiles
+
+`bitonic_v6_register` is a separate experimental v5 descendant, implemented in
+`cusort_v6.hpp`. It retains the same reflection/merge network and sortedness
+checkpoints, with compile-time working length and block dimensions. Its
+striped mapping is `index = thread + item * block_threads`, preserving coalesced
+loads/stores. Explicit compile-time register members hold each thread's tile:
+
+- Same-thread partners: disjoint register pairs, no memory or synchronization.
+- Same-warp partners with `fullsm=0`: wordwise shuffles, including record payloads.
+- Cross-warp partners: alternating shared-memory snapshots and a block barrier.
+- With `fullsm=1`, same-warp exchanges also use shared snapshots and warp barriers.
+  A block fence at the cross-warp/warp-local transition protects snapshot reuse.
+
+The first implementation deliberately retains two shared arrays (2 * Working *
+sizeof(T)); it does not claim a smaller shared footprint than v5. The sync path
+loads/stores the register tile directly from/to global memory. The async path
+stages through shared memory using the same cooperative-group copy mechanism
+as v5. The sortedness check materializes the register state in shared memory and
+uses the reference block check, so that flag still incurs its full check cost.
+Padding and comparison tie semantics match the references. Public legacy Sort,
+SortMerge and HybridSort dispatch, and v1 through v5 kernels, are unchanged.
+
+The benchmark sweeps 1, 2, 4, 8 and 16 values per thread, subject to the existing
+power-of-two working sizes, 32..1024 power-of-two block sizes, `--max-threads`,
+and device resource limits. Larger register tiles are deliberately not
+instantiated. Consequently v5 and v6 have different tuning spaces: compare
+matching thread counts to isolate the transformation, or compare their tuned
+envelopes as distinct implementations. All eight Sorted/Shared/Async choices
+and both element types remain included. CSV E/X definitions and full-batch
+validation are unchanged. Register allocation, predicted active blocks per SM,
+and local allocation are recorded for every v6 configuration.
+
+Static member access is intended to keep tile values in registers; compiler
+reports must establish the actual allocation and spill behavior. A speedup
+cannot be inferred from register use alone. The same resource checks skip
+configurations that cannot launch. After rebuilding, validate on the target GPU
+before collecting timings:
+
+```sh
+./bench --check-only --methods bitonic_v5_static,bitonic_v6_register,cub_block_merge
+./bench --methods bitonic_v5_static,bitonic_v6_register,cub_block_merge --output v5_v6_cub
+```

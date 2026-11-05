@@ -1,5 +1,6 @@
 #include "cusort.hpp"
 #include "cusort_experiments.hpp"
+#include "cusort_v6.hpp"
 #include "intanddata.hpp"
 #include "bench_distributions.hpp"
 #include <cub/block/block_load.cuh>
@@ -72,7 +73,7 @@ void usage() {
         "  --repetitions R    Timed repetitions after warm-up (default 5)\n"
         "  --output PREFIX   CSV path prefix\n"
         "  --methods LIST    Comma-separated CSV method names (default: all)\n"
-        "                    New: bitonic_v4_xor, bitonic_v5_static\n"
+        "                    New: bitonic_v4_xor, bitonic_v5_static, bitonic_v6_register\n"
         "  Distributions: six original cases + PERTURBED_2, _8, _32 (bounded value noise).\n"
         "  --check-only      Validate every applicable configuration, with 3 arrays\n"
         "                    and no timing; includes duplicate/extreme keys.\n"
@@ -126,7 +127,7 @@ BenchOptions parseOptions(int argc, char** argv) {
     if (o.maxSize && o.minSize > o.maxSize)
         throw std::runtime_error("--min-size exceeds --max-size");
     const std::set<std::string> knownMethods = {
-        "bitonic_warp", "bitonic_v1", "bitonic_v2", "bitonic_v3", "bitonic_v4_xor", "bitonic_v5_static",
+        "bitonic_warp", "bitonic_v1", "bitonic_v2", "bitonic_v3", "bitonic_v4_xor", "bitonic_v5_static", "bitonic_v6_register",
         "cub_block_merge", "thrust_segment_loop", "large_partition", "large_merge", "large_hybrid"};
     for (const auto& method : o.methods)
         if (!knownMethods.count(method)) throw std::runtime_error("Unknown --methods entry: " + method);
@@ -385,6 +386,12 @@ __global__ void benchmarkSortV5Static(T* data, int n) {
     cusort_experiment::Sort<T, Sorted, Shared, Async, Working, Threads>(segment, segment, n, Working);
 }
 
+template <typename T, unsigned Working, unsigned Threads, bool Sorted, bool Shared, bool Async>
+__global__ void benchmarkSortV6Register(T* data, int n) {
+    T* segment = data + size_t(blockIdx.x) * n;
+    cusort_v6::Sort<T, Working, Threads, Sorted, Shared, Async>(segment, segment, n);
+}
+
 // CUB padding must be strictly after valid records, even for INT_MAX keys.
 // Generated payloads are [0,count); INT_MAX is reserved for the padding record.
 template <typename T> struct CubLess {
@@ -487,6 +494,32 @@ void runV5(Batch<T>& batch, int working, int maxThreads, const cudaDeviceProp& d
     });
 }
 
+template <typename T, bool Sorted, bool Shared, bool Async>
+void runV6(Batch<T>& batch, int working, int maxThreads, const cudaDeviceProp& device) {
+    if (!batch.options.enabled("bitonic_v6_register")) return;
+    // Powers of two give an exact compile-time items-per-thread count. v3/v4
+    // retain the full warp-multiple sweep, including 96,160,... threads.
+    for_int_pow2<32, ComputeDefaultMaxBitoSort<T>() + 1>([&](auto sizeConstant) {
+        constexpr unsigned Working = decltype(sizeConstant)::value;
+        if (Working != unsigned(working)) return;
+        for_int_pow2<32, 1025>([&](auto threadsConstant) {
+            constexpr unsigned Threads = decltype(threadsConstant)::value;
+            if constexpr (Threads <= Working && Working / Threads <= 16) {
+                if (Threads > unsigned(maxThreads)) return;
+                auto kernel = benchmarkSortV6Register<T, Working, Threads, Sorted, Shared, Async>;
+                const size_t bytes = 2 * size_t(Working) * sizeof(T);
+                size_t shared = 0;
+                cudaFuncAttributes attr;
+                int active = 0;
+                if (!supportedKernel(kernel, Threads, bytes, device, &shared, &attr, &active)) return;
+                Configuration c{"bitonic_v6_register", Sorted, Shared, Async, int(Threads), int(Working / Threads),
+                                int(Working), shared, attr.numRegs, active, static_cast<long long>(attr.localSizeBytes)};
+                batch.run(c, [&] { kernel<<<batch.arrays, Threads, bytes>>>(batch.values.ptr, batch.n); });
+            }
+        });
+    });
+}
+
 template <typename T> void runSmallBitonic(Batch<T>& batch, const cudaDeviceProp& device) {
     const int working = std::max(32, GreaterPowerOf2EqualOrLarger(batch.n));
     const int maxThreads = std::min(batch.options.maxThreads, device.maxThreadsPerBlock);
@@ -512,6 +545,7 @@ template <typename T> void runSmallBitonic(Batch<T>& batch, const cudaDeviceProp
                     runV4<T, Sorted, Shared, Async>(batch, threads, working, device);
                 }
                 runV5<T, Sorted, Shared, Async>(batch, working, maxThreads, device);
+                runV6<T, Sorted, Shared, Async>(batch, working, maxThreads, device);
             });
         });
     });
