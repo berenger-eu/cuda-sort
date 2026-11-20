@@ -235,3 +235,9 @@ source modules
 
 Keep the module list, compiler flags, GPU model, benchmark command, and CSVs
 together when recording an experiment.
+
+# Citing
+
+The work is presented in a preprint:
+https://inria.hal.science/hal-05862901
+
